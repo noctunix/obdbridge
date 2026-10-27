@@ -11,12 +11,13 @@ sealed class GuardResult {
   const GuardResult();
 }
 
-/// The command passed the hard guard and was normalized to
-/// [normalizedCommand] (whitespace stripped, upper-cased).
+/// The command passed the hard guard exactly as given, in
+/// [canonicalCommand] — [HardGuard] performs no normalization, so this is
+/// the same string that was passed to [HardGuard.check].
 class GuardAllowed extends GuardResult {
-  final String normalizedCommand;
+  final String canonicalCommand;
 
-  const GuardAllowed(this.normalizedCommand);
+  const GuardAllowed(this.canonicalCommand);
 }
 
 /// The command was rejected by the hard guard for [reason].
@@ -32,12 +33,24 @@ class GuardRejected extends GuardResult {
 /// [HardGuard] then still rejects anything outside its own read-only
 /// allow-list regardless of what the policy permits.
 abstract class CommandPolicy {
-  /// Whether [normalizedCommand] (already normalized by [HardGuard]) is
-  /// allowed by this policy.
-  bool allows(String normalizedCommand);
+  /// Whether [canonicalCommand] (already accepted as canonical by
+  /// [HardGuard]) is allowed by this policy.
+  bool allows(String canonicalCommand);
 }
 
 /// The fixed, library-owned read-only guard.
+///
+/// Performs no normalization: a command is only ever acceptable if it is
+/// already canonical — non-empty, and composed only of `0`-`9`, `A`-`Z`
+/// and `@` — before the allow-list below even applies. Whitespace, CR/LF,
+/// a BOM, any other control or Unicode character, and lowercase letters
+/// are all rejected outright rather than stripped or case-folded: a
+/// command session writes exactly the string this guard allowed plus a
+/// single terminating `\r`, so silently accepting e.g. `"2201\r04"` here
+/// would let a second, unreviewed command (`04`, clear diagnostic trouble
+/// codes) reach the wire, and would hide the non-canonical input from the
+/// caller's own [CommandPolicy], which only ever sees what this guard
+/// allowed.
 ///
 /// Allows only a fixed allow-list of adapter `AT`/`ST` commands, OBD mode
 /// 01 reads (`01` + a 2-hex-digit PID), and UDS ReadDataByIdentifier (`22`
@@ -53,8 +66,8 @@ abstract class CommandPolicy {
 class HardGuard {
   HardGuard._();
 
+  static final RegExp _canonical = RegExp(r'^[0-9A-Z@]+$');
   static final RegExp _hex = RegExp(r'^[0-9A-F]+$');
-  static final RegExp _whitespace = RegExp(r'\s+');
 
   // Real allowed commands are at most 6 hex characters (service + 2-byte
   // DID); anything longer than this is rejected outright rather than
@@ -107,55 +120,62 @@ class HardGuard {
     RegExp(r'^ATFCSM[0-2]$'),
   ];
 
-  static bool _isAllowedAdapterCommand(String normalized) {
-    return _exactAdapterCommands.contains(normalized) ||
-        _adapterPatterns.any((pattern) => pattern.hasMatch(normalized));
+  static bool _isAllowedAdapterCommand(String command) {
+    return _exactAdapterCommands.contains(command) ||
+        _adapterPatterns.any((pattern) => pattern.hasMatch(command));
   }
 
-  /// Normalizes [command] and checks it against the hard, library-owned
-  /// read-only allow-list.
+  /// Checks [command] against the hard, library-owned read-only allow-list.
+  ///
+  /// [command] must already be canonical; see the class doc comment. Any
+  /// character outside `0`-`9`, `A`-`Z` and `@` — including whitespace,
+  /// CR/LF, a BOM, lowercase letters, or any other control or Unicode
+  /// character — rejects the command outright, before the allow-list
+  /// below is even consulted.
   static GuardResult check(String command) {
-    final normalized = command.replaceAll(_whitespace, '').toUpperCase();
-
-    if (normalized.isEmpty) {
+    if (command.isEmpty) {
       return const GuardRejected('empty command');
     }
 
-    if (normalized.startsWith('AT') || normalized.startsWith('ST')) {
-      if (_isAllowedAdapterCommand(normalized)) {
-        return GuardAllowed(normalized);
+    if (!_canonical.hasMatch(command)) {
+      return const GuardRejected('not a canonical command');
+    }
+
+    if (command.startsWith('AT') || command.startsWith('ST')) {
+      if (_isAllowedAdapterCommand(command)) {
+        return GuardAllowed(command);
       }
       return const GuardRejected('adapter command not in allow-list');
     }
 
-    if (!_hex.hasMatch(normalized)) {
+    if (!_hex.hasMatch(command)) {
       return const GuardRejected('not a valid hex command');
     }
 
-    if (normalized.length % 2 != 0) {
+    if (command.length % 2 != 0) {
       return const GuardRejected('odd-length hex command');
     }
 
-    if (normalized.length > _maxHexLength) {
+    if (command.length > _maxHexLength) {
       return const GuardRejected('command too long');
     }
 
-    final service = normalized.substring(0, 2);
+    final service = command.substring(0, 2);
     switch (service) {
       case '01':
-        if (normalized.length == 4) {
-          return GuardAllowed(normalized);
+        if (command.length == 4) {
+          return GuardAllowed(command);
         }
         return const GuardRejected('malformed mode 01 read');
       case '22':
-        if (normalized.length != 6) {
+        if (command.length != 6) {
           return const GuardRejected('malformed UDS ReadDataByIdentifier');
         }
-        final did = normalized.substring(2);
+        final did = command.substring(2);
         if (_blockedDids.contains(did)) {
           return GuardRejected('blocked identifier $did');
         }
-        return GuardAllowed(normalized);
+        return GuardAllowed(command);
       default:
         return GuardRejected('service $service not allowed');
     }
@@ -173,14 +193,15 @@ class GuardedCommandFilter {
   const GuardedCommandFilter(this.policy);
 
   /// Runs [command] through [HardGuard] and, if that allows it, through
-  /// [policy].
+  /// [policy] — both receive [command] exactly as given, with no
+  /// transformation in between.
   GuardResult check(String command) {
     final hardResult = HardGuard.check(command);
     if (hardResult is GuardRejected) {
       return hardResult;
     }
     final allowed = hardResult as GuardAllowed;
-    if (!policy.allows(allowed.normalizedCommand)) {
+    if (!policy.allows(allowed.canonicalCommand)) {
       return const GuardRejected('rejected by caller policy');
     }
     return allowed;

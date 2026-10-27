@@ -6,14 +6,14 @@ import 'package:obdbridge/obdbridge.dart';
 
 class _AllowAllPolicy implements CommandPolicy {
   @override
-  bool allows(String normalizedCommand) => true;
+  bool allows(String canonicalCommand) => true;
 
   const _AllowAllPolicy();
 }
 
 class _DenyAllPolicy implements CommandPolicy {
   @override
-  bool allows(String normalizedCommand) => false;
+  bool allows(String canonicalCommand) => false;
 
   const _DenyAllPolicy();
 }

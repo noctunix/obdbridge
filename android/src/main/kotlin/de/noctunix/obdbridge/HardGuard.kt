@@ -5,10 +5,11 @@ package de.noctunix.obdbridge
  */
 sealed class GuardResult {
     /**
-     * The command passed the hard guard and was normalized to
-     * [normalizedCommand] (whitespace stripped, upper-cased).
+     * The command passed the hard guard exactly as given, in
+     * [canonicalCommand] — [HardGuard] performs no normalization, so this
+     * is the same string that was passed to [HardGuard.check].
      */
-    data class Allowed(val normalizedCommand: String) : GuardResult()
+    data class Allowed(val canonicalCommand: String) : GuardResult()
 
     /**
      * The command was rejected by the hard guard for [reason].
@@ -25,14 +26,26 @@ sealed class GuardResult {
  */
 interface CommandPolicy {
     /**
-     * Whether [normalizedCommand] (already normalized by [HardGuard]) is
-     * allowed by this policy.
+     * Whether [canonicalCommand] (already accepted as canonical by
+     * [HardGuard]) is allowed by this policy.
      */
-    fun allows(normalizedCommand: String): Boolean
+    fun allows(canonicalCommand: String): Boolean
 }
 
 /**
  * The fixed, library-owned read-only guard.
+ *
+ * Performs no normalization: a command is only ever acceptable if it is
+ * already canonical — non-empty, and composed only of `0`-`9`, `A`-`Z` and
+ * `@` — before the allow-list below even applies. Whitespace, CR/LF, a
+ * BOM, any other control or Unicode character, and lowercase letters are
+ * all rejected outright rather than stripped or case-folded: a command
+ * session writes exactly the string this guard allowed plus a single
+ * terminating `\r`, so silently accepting e.g. `"2201\r04"` here would let
+ * a second, unreviewed command (`04`, clear diagnostic trouble codes)
+ * reach the wire, and would hide the non-canonical input from the
+ * caller's own [CommandPolicy], which only ever sees what this guard
+ * allowed.
  *
  * Allows only a fixed allow-list of adapter `AT`/`ST` commands, OBD mode
  * 01 reads (`01` + a 2-hex-digit PID), and UDS ReadDataByIdentifier (`22`
@@ -47,8 +60,8 @@ interface CommandPolicy {
  * read-only guarantee.
  */
 object HardGuard {
+    private val CANONICAL = Regex("^[0-9A-Z@]+$")
     private val HEX = Regex("^[0-9A-F]+$")
-    private val WHITESPACE = Regex("\\s+")
 
     // Real allowed commands are at most 6 hex characters (service + 2-byte
     // DID); anything longer than this is rejected outright rather than
@@ -83,59 +96,66 @@ object HardGuard {
         Regex("^ATFCSM[0-2]$"),
     )
 
-    private fun isAllowedAdapterCommand(normalized: String): Boolean {
-        return normalized in EXACT_ADAPTER_COMMANDS ||
-            ADAPTER_PATTERNS.any { it.matches(normalized) }
+    private fun isAllowedAdapterCommand(command: String): Boolean {
+        return command in EXACT_ADAPTER_COMMANDS ||
+            ADAPTER_PATTERNS.any { it.matches(command) }
     }
 
     /**
-     * Normalizes [command] and checks it against the hard, library-owned
-     * read-only allow-list.
+     * Checks [command] against the hard, library-owned read-only allow-list.
+     *
+     * [command] must already be canonical; see the class doc comment. Any
+     * character outside `0`-`9`, `A`-`Z` and `@` — including whitespace,
+     * CR/LF, a BOM, lowercase letters, or any other control or Unicode
+     * character — rejects the command outright, before the allow-list
+     * below is even consulted.
      */
     fun check(command: String): GuardResult {
-        val normalized = command.replace(WHITESPACE, "").uppercase()
-
-        if (normalized.isEmpty()) {
+        if (command.isEmpty()) {
             return GuardResult.Rejected("empty command")
         }
 
-        if (normalized.startsWith("AT") || normalized.startsWith("ST")) {
-            return if (isAllowedAdapterCommand(normalized)) {
-                GuardResult.Allowed(normalized)
+        if (!CANONICAL.matches(command)) {
+            return GuardResult.Rejected("not a canonical command")
+        }
+
+        if (command.startsWith("AT") || command.startsWith("ST")) {
+            return if (isAllowedAdapterCommand(command)) {
+                GuardResult.Allowed(command)
             } else {
                 GuardResult.Rejected("adapter command not in allow-list")
             }
         }
 
-        if (!HEX.matches(normalized)) {
+        if (!HEX.matches(command)) {
             return GuardResult.Rejected("not a valid hex command")
         }
 
-        if (normalized.length % 2 != 0) {
+        if (command.length % 2 != 0) {
             return GuardResult.Rejected("odd-length hex command")
         }
 
-        if (normalized.length > MAX_HEX_LENGTH) {
+        if (command.length > MAX_HEX_LENGTH) {
             return GuardResult.Rejected("command too long")
         }
 
-        val service = normalized.substring(0, 2)
+        val service = command.substring(0, 2)
         return when (service) {
             "01" ->
-                if (normalized.length == 4) {
-                    GuardResult.Allowed(normalized)
+                if (command.length == 4) {
+                    GuardResult.Allowed(command)
                 } else {
                     GuardResult.Rejected("malformed mode 01 read")
                 }
             "22" -> {
-                if (normalized.length != 6) {
+                if (command.length != 6) {
                     GuardResult.Rejected("malformed UDS ReadDataByIdentifier")
                 } else {
-                    val did = normalized.substring(2)
+                    val did = command.substring(2)
                     if (did in BLOCKED_DIDS) {
                         GuardResult.Rejected("blocked identifier $did")
                     } else {
-                        GuardResult.Allowed(normalized)
+                        GuardResult.Allowed(command)
                     }
                 }
             }
@@ -154,7 +174,8 @@ object HardGuard {
 class GuardedCommandFilter(private val policy: CommandPolicy) {
     /**
      * Runs [command] through [HardGuard] and, if that allows it, through
-     * the policy.
+     * the policy — both receive [command] exactly as given, with no
+     * transformation in between.
      */
     fun check(command: String): GuardResult {
         val hardResult = HardGuard.check(command)
@@ -162,7 +183,7 @@ class GuardedCommandFilter(private val policy: CommandPolicy) {
             return hardResult
         }
         val allowed = hardResult as GuardResult.Allowed
-        return if (!policy.allows(allowed.normalizedCommand)) {
+        return if (!policy.allows(allowed.canonicalCommand)) {
             GuardResult.Rejected("rejected by caller policy")
         } else {
             allowed

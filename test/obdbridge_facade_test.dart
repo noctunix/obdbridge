@@ -7,7 +7,7 @@ import 'package:obdbridge/src/obdbridge_api.g.dart' show NativeObdApi;
 
 class _AllowAllPolicy implements CommandPolicy {
   @override
-  bool allows(String normalizedCommand) => true;
+  bool allows(String canonicalCommand) => true;
 }
 
 class _DenyCommandsPolicy implements CommandPolicy {
@@ -16,7 +16,7 @@ class _DenyCommandsPolicy implements CommandPolicy {
   final Set<String> denied;
 
   @override
-  bool allows(String normalizedCommand) => !denied.contains(normalizedCommand);
+  bool allows(String canonicalCommand) => !denied.contains(canonicalCommand);
 }
 
 /// Records every plan/request handed to it instead of ever reaching a real

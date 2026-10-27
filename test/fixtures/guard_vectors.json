@@ -1,6 +1,6 @@
 [
   { "command": "ATZ", "allowed": true, "reason": "adapter command: reset" },
-  { "command": "atd", "allowed": true, "reason": "adapter command: defaults, lowercase normalized" },
+  { "command": "atd", "allowed": false, "reason": "adapter command: lowercase rejected, no normalization" },
   { "command": "ATI", "allowed": true, "reason": "adapter command: identify" },
   { "command": "AT@1", "allowed": true, "reason": "adapter command: device description" },
   { "command": "ATRV", "allowed": true, "reason": "adapter command: read voltage" },
@@ -14,8 +14,8 @@
   { "command": "ATCAF1", "allowed": true, "reason": "adapter command: CAN auto formatting on" },
   { "command": "ATAR", "allowed": true, "reason": "adapter command: auto receive address" },
   { "command": "ATMA", "allowed": true, "reason": "adapter command: monitor all" },
-  { "command": "AT SP 0", "allowed": true, "reason": "adapter command: set protocol 0, whitespace stripped" },
-  { "command": "atsp0", "allowed": true, "reason": "adapter command: set protocol 0, lowercase normalized" },
+  { "command": "AT SP 0", "allowed": false, "reason": "adapter command: embedded whitespace rejected, no normalization" },
+  { "command": "atsp0", "allowed": false, "reason": "adapter command: lowercase rejected, no normalization" },
   { "command": "ATSPC", "allowed": true, "reason": "adapter command: set protocol, top of range" },
   { "command": "ATSPD", "allowed": false, "reason": "adapter command: set protocol, out of range" },
   { "command": "ATSPA6", "allowed": false, "reason": "adapter command: auto-search protocol variant not allowed" },
@@ -46,7 +46,7 @@
   { "command": "ATFCSM3", "allowed": false, "reason": "adapter command: set flow control mode, out of range" },
   { "command": "STI", "allowed": true, "reason": "adapter command: STN identify" },
   { "command": "STDI", "allowed": true, "reason": "adapter command: STN device information" },
-  { "command": "sti", "allowed": true, "reason": "adapter command: STN identify, lowercase normalized" },
+  { "command": "sti", "allowed": false, "reason": "adapter command: lowercase rejected, no normalization" },
 
   { "command": "STPX", "allowed": false, "reason": "STN raw CAN transmit, not in allow-list" },
   { "command": "STPX0100", "allowed": false, "reason": "STN raw CAN transmit with arguments, not in allow-list" },
@@ -63,14 +63,14 @@
 
   { "command": "0100", "allowed": true, "reason": "mode 01 read, PID 00" },
   { "command": "010C", "allowed": true, "reason": "mode 01 read, PID 0C (engine RPM)" },
-  { "command": "010c", "allowed": true, "reason": "mode 01 read, lowercase normalized" },
-  { "command": " 01 0D ", "allowed": true, "reason": "mode 01 read, whitespace stripped" },
+  { "command": "010c", "allowed": false, "reason": "mode 01 read: lowercase rejected, no normalization" },
+  { "command": " 01 0D ", "allowed": false, "reason": "mode 01 read: embedded whitespace rejected, no normalization" },
 
   { "command": "220105", "allowed": true, "reason": "UDS ReadDataByIdentifier, arbitrary DID" },
-  { "command": "22f18a", "allowed": true, "reason": "UDS ReadDataByIdentifier, lowercase normalized, DID not blocked" },
+  { "command": "22f18a", "allowed": false, "reason": "UDS ReadDataByIdentifier: lowercase rejected, no normalization" },
 
   { "command": "22F190", "allowed": false, "reason": "blocked DID: VIN" },
-  { "command": "22f190", "allowed": false, "reason": "blocked DID: VIN, lowercase normalized" },
+  { "command": "22f190", "allowed": false, "reason": "lowercase rejected, no normalization (also a blocked DID)" },
   { "command": "22F802", "allowed": false, "reason": "blocked DID: VIN (alternate)" },
   { "command": "22F18C", "allowed": false, "reason": "blocked DID: ECU serial number" },
 
@@ -90,5 +90,14 @@
   { "command": "01GZ", "allowed": false, "reason": "non-hex characters" },
   { "command": "220105EXTRA", "allowed": false, "reason": "non-hex characters" },
   { "command": "0100000000000000", "allowed": false, "reason": "overlong hex command" },
-  { "command": "22010500", "allowed": false, "reason": "wrong length for UDS ReadDataByIdentifier" }
+  { "command": "22010500", "allowed": false, "reason": "wrong length for UDS ReadDataByIdentifier" },
+
+  { "command": "2201\r04", "allowed": false, "reason": "embedded CR would smuggle a second command (04: clear diagnostic trouble codes) onto the wire" },
+  { "command": "2201 04", "allowed": false, "reason": "embedded space rejected, no normalization" },
+  { "command": "﻿ATZ", "allowed": false, "reason": "leading byte-order mark rejected, no normalization" },
+  { "command": "0105\r", "allowed": false, "reason": "trailing CR rejected, no normalization" },
+  { "command": "ATZ\n", "allowed": false, "reason": "trailing LF rejected, no normalization" },
+  { "command": " 22F190", "allowed": false, "reason": "leading whitespace rejected, no normalization (also a blocked DID)" },
+  { "command": "22f40d", "allowed": false, "reason": "lowercase rejected, no normalization" },
+  { "command": "ATZ\u0000", "allowed": false, "reason": "embedded NUL control character rejected, no normalization" }
 ]

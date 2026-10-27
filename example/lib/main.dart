@@ -33,7 +33,7 @@ class ScanAndConnectScreen extends StatefulWidget {
 /// comment above), so its policy has nothing to allow.
 class _DenyAllCommandPolicy implements CommandPolicy {
   @override
-  bool allows(String normalizedCommand) => false;
+  bool allows(String canonicalCommand) => false;
 }
 
 class _ScanAndConnectScreenState extends State<ScanAndConnectScreen> {
