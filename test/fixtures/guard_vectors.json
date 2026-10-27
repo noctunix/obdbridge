@@ -1,0 +1,38 @@
+[
+  { "command": "ATZ", "allowed": true, "reason": "adapter command" },
+  { "command": "atd0", "allowed": true, "reason": "adapter command, lowercase normalized" },
+  { "command": "AT SP 0", "allowed": true, "reason": "adapter command with internal whitespace stripped" },
+  { "command": "STDI", "allowed": true, "reason": "adapter command (ST prefix)" },
+  { "command": "stm1", "allowed": true, "reason": "adapter command, lowercase normalized" },
+
+  { "command": "0100", "allowed": true, "reason": "mode 01 read, PID 00" },
+  { "command": "010C", "allowed": true, "reason": "mode 01 read, PID 0C (engine RPM)" },
+  { "command": "010c", "allowed": true, "reason": "mode 01 read, lowercase normalized" },
+  { "command": " 01 0D ", "allowed": true, "reason": "mode 01 read, whitespace stripped" },
+
+  { "command": "220105", "allowed": true, "reason": "UDS ReadDataByIdentifier, arbitrary DID" },
+  { "command": "22f18a", "allowed": true, "reason": "UDS ReadDataByIdentifier, lowercase normalized, DID not blocked" },
+
+  { "command": "22F190", "allowed": false, "reason": "blocked DID: VIN" },
+  { "command": "22f190", "allowed": false, "reason": "blocked DID: VIN, lowercase normalized" },
+  { "command": "22F802", "allowed": false, "reason": "blocked DID: VIN (alternate)" },
+  { "command": "22F18C", "allowed": false, "reason": "blocked DID: ECU serial number" },
+
+  { "command": "1003", "allowed": false, "reason": "service 10 (diagnostic session control) not allowed" },
+  { "command": "1101", "allowed": false, "reason": "service 11 (ECU reset) not allowed" },
+  { "command": "1401", "allowed": false, "reason": "service 14 (clear diagnostic information) not allowed" },
+  { "command": "1901", "allowed": false, "reason": "service 19 (read DTC information) not allowed" },
+  { "command": "2701", "allowed": false, "reason": "service 27 (security access) not allowed" },
+  { "command": "2E01", "allowed": false, "reason": "service 2E (write data by identifier) not allowed" },
+  { "command": "3101", "allowed": false, "reason": "service 31 (routine control) not allowed" },
+  { "command": "3E00", "allowed": false, "reason": "service 3E (tester present) not allowed" },
+  { "command": "0400", "allowed": false, "reason": "OBD mode 04 (clear emission DTCs) not allowed" },
+
+  { "command": "", "allowed": false, "reason": "empty command" },
+  { "command": "   ", "allowed": false, "reason": "empty after stripping whitespace" },
+  { "command": "010", "allowed": false, "reason": "odd-length hex" },
+  { "command": "01GZ", "allowed": false, "reason": "non-hex characters" },
+  { "command": "220105EXTRA", "allowed": false, "reason": "non-hex characters" },
+  { "command": "0100000000000000", "allowed": false, "reason": "overlong hex command" },
+  { "command": "22010500", "allowed": false, "reason": "wrong length for UDS ReadDataByIdentifier" }
+]
