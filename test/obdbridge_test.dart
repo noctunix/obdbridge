@@ -3,6 +3,6 @@ import 'package:obdbridge/obdbridge.dart';
 
 void main() {
   test('obdbridgeVersion matches pubspec version', () {
-    expect(obdbridgeVersion, '0.0.1');
+    expect(obdbridgeVersion, '0.1.0');
   });
 }

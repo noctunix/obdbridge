@@ -33,4 +33,4 @@ export 'src/obdbridge_api.g.dart'
 /// Current obdbridge package version.
 ///
 /// Kept in sync with the `version:` field in `pubspec.yaml`.
-const String obdbridgeVersion = '0.0.1';
+const String obdbridgeVersion = '0.1.0';

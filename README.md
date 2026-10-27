@@ -112,7 +112,7 @@ dependencies:
   obdbridge:
     git:
       url: https://github.com/noctunix/obdbridge.git
-      ref: v0.0.1
+      ref: v0.1.0
 ```
 
 For local development against a checked-out copy, add a gitignored
