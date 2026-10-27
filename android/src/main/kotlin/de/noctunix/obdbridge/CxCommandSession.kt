@@ -407,6 +407,15 @@ class CxCommandSession(
             finish(next, CxCommandResult(CxCommandOutcome.REJECTED_BY_GUARD, null))
             return
         }
+        // The guard only ever allows an already-canonical command, but this check stays as a
+        // defensive backstop against a future guard regression: a command containing its own
+        // `\r`/`\n` would smuggle a second, unreviewed command onto the wire past the single
+        // terminator appended below. Rejected the same way a guard failure is, rather than
+        // thrown, so a regression here fails closed instead of crashing the host app.
+        if (next.command.contains('\r') || next.command.contains('\n')) {
+            finish(next, CxCommandResult(CxCommandOutcome.REJECTED_BY_GUARD, null))
+            return
+        }
         val wrote = transport.write("${next.command}\r".toByteArray(Charsets.US_ASCII))
         if (!wrote) {
             finish(next, CxCommandResult(CxCommandOutcome.WRITE_FAILED, null))

@@ -780,6 +780,20 @@ class CxCommandSessionTest {
     }
 
     @Test
+    fun aCommandContainingItsOwnLineTerminatorNeverReachesTheWireEvenIfTheGuardWouldAllowIt() {
+        val transport = FakeCxCommandTransport()
+        // A guard that (wrongly) allows a command carrying its own CR, simulating a future
+        // regression in HardGuard — the session's own defensive check must still catch it.
+        val session = CxCommandSession(transport, FakeCxCommandClock(), guard = { true })
+        val results = mutableListOf<CxCommandResult>()
+
+        session.execute("2201\r04", 1_000L) { results.add(it) }
+
+        assertTrue(transport.writes.isEmpty())
+        assertEquals(CxCommandOutcome.REJECTED_BY_GUARD, results.single().outcome)
+    }
+
+    @Test
     fun aCommandRejectedByTheGuardNeverReachesTheWire() {
         val transport = FakeCxCommandTransport()
         val session = newSession(transport)
