@@ -523,6 +523,68 @@ class CxCommandSessionTest {
     }
 
     @Test
+    fun startQuietDrainDiscardsALateReplyInsteadOfMisattributingItToTheFirstCommand() {
+        val transport = FakeCxCommandTransport()
+        val clock = FakeCxCommandClock()
+        val session = newSession(transport, clock) // quietPeriodMs defaults to 50
+        session.startQuietDrain()
+
+        // A fake transport delivering a late reply from a session this one is taking over —
+        // nothing is dispatched yet, so there is nothing of this session's own to attach it to;
+        // it must not be allowed to leak into whatever gets written next either, which is exactly
+        // what the drain below checks.
+        session.onNotification("OK>".toByteArray(Charsets.US_ASCII))
+
+        val results = mutableListOf<CxCommandResult>()
+        session.execute("ATZ", 1_000L) { results.add(it) }
+        // Still draining — the late bytes restarted the 50ms wait, so nothing has been written.
+        assertTrue(transport.writes.isEmpty())
+
+        clock.fireNextDue() // the restarted wait elapses with no further bytes
+        assertEquals(listOf("ATZ\r"), transport.writes)
+        assertTrue(results.isEmpty())
+
+        session.onNotification("ELM327 v1.5\r>".toByteArray(Charsets.US_ASCII))
+        assertEquals(CxCommandOutcome.OK, results.single().outcome)
+        assertEquals("ELM327 v1.5", results.single().responseText)
+    }
+
+    @Test
+    fun startQuietDrainGivesUpAfterTheOverallDeadlineRatherThanBlockingForever() {
+        val transport = FakeCxCommandTransport()
+        val clock = FakeCxCommandClock()
+        val session = newSession(transport, clock) // maxQuietPeriodMs defaults to 1_000
+        session.startQuietDrain()
+
+        // The adapter (or whatever is left of the old session's own transport) keeps sending
+        // bytes every 40ms — the quiet wait keeps restarting and never once naturally elapses.
+        repeat(24) {
+            clock.advanceBy(40)
+            session.onNotification("X".toByteArray(Charsets.US_ASCII))
+        }
+
+        val results = mutableListOf<CxCommandResult>()
+        session.execute("ATZ", 1_000L) { results.add(it) }
+        assertTrue(transport.writes.isEmpty())
+
+        clock.fireNextDue() // t=1000: the overall deadline fires, not the (later) quiet wait
+        assertEquals(listOf("ATZ\r"), transport.writes)
+    }
+
+    @Test
+    fun startQuietDrainIsANoOpWhileAlreadyQuiescing() {
+        val transport = FakeCxCommandTransport()
+        val clock = FakeCxCommandClock()
+        val session = newSession(transport, clock)
+        session.startQuietDrain()
+        val pendingBefore = clock.pendingCount
+
+        session.startQuietDrain() // already quiescing; must not reschedule anything
+
+        assertEquals(pendingBefore, clock.pendingCount)
+    }
+
+    @Test
     fun aCommandStillQueuedPastItsOwnDeadlineTimesOutWithoutBeingWritten() {
         val transport = FakeCxCommandTransport()
         val clock = FakeCxCommandClock()

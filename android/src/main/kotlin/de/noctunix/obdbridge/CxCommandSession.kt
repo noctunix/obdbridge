@@ -175,13 +175,20 @@ class CxCommandSession(
         val listener: ((CxCommandResult) -> Unit)?,
     )
 
+    /** What a currently running quiet wait is for — distinguishes the resync quiet wait
+     * ([enterQuietPeriod]) from a plain startup drain ([startQuietDrain]): both share the same
+     * [quietTask]/[quietOverallDeadlineTask] machinery, but only the former writes anything once
+     * the wait is over. */
+    private enum class QuietPurpose { RESYNC, STARTUP_DRAIN }
+
     private val queue = ArrayDeque<PendingCommand>()
     private var active: PendingCommand? = null
     private var resyncRequired = false
 
-    /** `true` while waiting out the quiet period before the first resync step; every dispatch
-     * is blocked during this, including resync steps themselves. */
+    /** `true` while waiting out a quiet period, for either [QuietPurpose]; every dispatch is
+     * blocked during this, including resync steps themselves. */
     private var quiescing = false
+    private var quietPurpose: QuietPurpose = QuietPurpose.RESYNC
     private var quietTask: CxScheduledTask? = null
     private var quietOverallDeadlineTask: CxScheduledTask? = null
 
@@ -300,6 +307,32 @@ class CxCommandSession(
     @Synchronized
     fun onConnected() {
         if (resyncRequired && !resyncAttemptInProgress) enterQuietPeriod()
+    }
+
+    /** `true` if a command was actually written and may still have a reply genuinely in flight
+     * on the wire, or a quiet wait (of either [QuietPurpose]) is already running — the two cases
+     * [ObdApi.retireCommandSession] checks before replacing this instance, to decide whether the
+     * session taking over needs [startQuietDrain] at all. */
+    @Synchronized
+    fun hasPossiblyInFlightReply(): Boolean = active != null || quiescing
+
+    /** Call on a freshly built session that is taking over a connection from one that could
+     * still have a reply genuinely in flight on the wire (a command was written on the old
+     * instance and never resolved before it was torn down) — before this session's first
+     * [execute] or resync step is dispatched, drains any such stray bytes by waiting out the same
+     * [quietPeriodMs] a resync attempt uses, bounded by [maxQuietPeriodMs] so a chatty or stuck
+     * adapter cannot block startup forever. Unlike a resync attempt, nothing is written once the
+     * wait ends either way — dispatch simply resumes. A no-op if a quiet wait is already running
+     * (of either purpose). */
+    @Synchronized
+    fun startQuietDrain() {
+        if (quiescing) return
+        quiescing = true
+        quietPurpose = QuietPurpose.STARTUP_DRAIN
+        val myEpoch = epoch
+        quietOverallDeadlineTask?.cancel()
+        quietOverallDeadlineTask = clock.schedule(maxQuietPeriodMs) { onQuietPeriodOverallDeadline(myEpoch) }
+        restartQuietTimer()
     }
 
     private fun teardown(outcome: CxCommandOutcome) {
@@ -423,6 +456,7 @@ class CxCommandSession(
 
     private fun enterQuietPeriod() {
         quiescing = true
+        quietPurpose = QuietPurpose.RESYNC
         resyncAttemptInProgress = true
         val myEpoch = epoch
         quietOverallDeadlineTask?.cancel()
@@ -443,21 +477,32 @@ class CxCommandSession(
             quietTask = null
             quietOverallDeadlineTask?.cancel()
             quietOverallDeadlineTask = null
-            beginResyncIfConfigured(myEpoch)
+            if (quietPurpose == QuietPurpose.STARTUP_DRAIN) {
+                dispatchNext()
+            } else {
+                beginResyncIfConfigured(myEpoch)
+            }
         }
     }
 
-    /** The adapter never went quiet for the full resync attempt; no step is ever written for
-     * this attempt, and [resyncRequired] stays set for the next [onConnected] to try again. */
+    /** The adapter never went quiet for the full attempt. For [QuietPurpose.RESYNC], no step is
+     * ever written for this attempt, and [resyncRequired] stays set for the next [onConnected] to
+     * try again. For [QuietPurpose.STARTUP_DRAIN] (see [startQuietDrain]), there is nothing to
+     * report either way — dispatch simply resumes once the bound is hit, exactly like a wait that
+     * actually went quiet. */
     private fun onQuietPeriodOverallDeadline(myEpoch: Long) {
         synchronized(this) {
             if (myEpoch != epoch || !quiescing) return
             quiescing = false
-            resyncAttemptInProgress = false
             quietTask?.cancel()
             quietTask = null
             quietOverallDeadlineTask = null
-            resyncStepListener?.invoke(CxCommandResult(CxCommandOutcome.QUIET_PERIOD_EXPIRED, null))
+            if (quietPurpose == QuietPurpose.STARTUP_DRAIN) {
+                dispatchNext()
+            } else {
+                resyncAttemptInProgress = false
+                resyncStepListener?.invoke(CxCommandResult(CxCommandOutcome.QUIET_PERIOD_EXPIRED, null))
+            }
         }
     }
 

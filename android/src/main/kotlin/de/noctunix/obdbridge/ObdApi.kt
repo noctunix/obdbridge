@@ -90,7 +90,15 @@ internal constructor(
      * does. */
     private fun retireCommandSession(maxResponseBytes: Int) {
         val previous = commandSession
+        // Checked before `previous.cancel()` below, which clears `previous`'s own `active`/
+        // `quiescing` state as part of tearing it down — by the time that call returns there is
+        // nothing left to ask it. A `true` result means a command was written (or already
+        // quiescing) on `previous` without a resolved reply; its late answer could otherwise
+        // still arrive on the wire after this method returns and be misread as the new session's
+        // own first command's response (see `CxCommandSession.startQuietDrain`'s own doc).
+        val mayHaveReplyInFlight = previous.hasPossiblyInFlightReply()
         commandSession = buildCommandSession(maxResponseBytes)
+        if (mayHaveReplyInFlight) commandSession.startQuietDrain()
         previous.cancel()
     }
 
@@ -603,13 +611,8 @@ internal constructor(
      * reconnect — see [recordingPoller]'s doc on why there is only ever one) and resizes
      * [commandSession] for [maxResponseBytes], exactly like [startLive] would for its own
      * takeover — unconditionally, since nothing is left running on the old slot to protect.
-     *
-     * Known gap, shared with [startLive]'s own takeover: the replaced [CxCommandSession] can
-     * still have a vehicle read genuinely in flight on the wire; this does not wait out a quiet
-     * period before the caller's own first init command, so that read's late reply can in rare
-     * cases be misread as the answer to that command instead (visible result: a reported init
-     * failure, never a silently wrong value). Left for whichever package next touches this
-     * takeover path to actually close. */
+     * [retireCommandSession] drains any reply the replaced session could still have genuinely in
+     * flight on the wire before the caller's own first command dispatches on the new one. */
     internal fun prepareConnectionForRecording(maxResponseBytes: Int): CxCommandSession? {
         val current = session ?: return null
         if (bleClient.currentState() !is CxLinkState.Connected) return null
