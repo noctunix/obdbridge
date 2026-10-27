@@ -70,7 +70,9 @@ class _ScanAndConnectScreenState extends State<ScanAndConnectScreen> {
     setState(() {
       _scanning = false;
       _adapters = adapters;
-      _status = adapters.isEmpty ? 'no adapter found' : '${adapters.length} adapter(s) found';
+      _status = adapters.isEmpty
+          ? 'no adapter found'
+          : '${adapters.length} adapter(s) found';
     });
   }
 
@@ -79,7 +81,9 @@ class _ScanAndConnectScreenState extends State<ScanAndConnectScreen> {
     final state = await _api.connect(adapter.handle);
     setState(() {
       _status = 'link state: ${state.state.name}';
-      _connectedHandle = state.state == ObdLinkStateValueMessage.connected ? adapter.handle : null;
+      _connectedHandle = state.state == ObdLinkStateValueMessage.connected
+          ? adapter.handle
+          : null;
     });
   }
 
@@ -108,7 +112,10 @@ class _ScanAndConnectScreenState extends State<ScanAndConnectScreen> {
           ),
           const SizedBox(height: 8),
           if (_connectedHandle != null)
-            ElevatedButton(onPressed: _disconnect, child: const Text('Disconnect')),
+            ElevatedButton(
+              onPressed: _disconnect,
+              child: const Text('Disconnect'),
+            ),
           const SizedBox(height: 16),
           Expanded(
             child: ListView.builder(
@@ -117,11 +124,15 @@ class _ScanAndConnectScreenState extends State<ScanAndConnectScreen> {
                 final adapter = _adapters[index];
                 return ListTile(
                   title: Text(adapter.advertisedName ?? adapter.handle),
-                  subtitle: Text('handle: ${adapter.handle}, rssi: ${adapter.rssi ?? '?'}'),
+                  subtitle: Text(
+                    'handle: ${adapter.handle}, rssi: ${adapter.rssi ?? '?'}',
+                  ),
                   trailing: _connectedHandle == adapter.handle
                       ? const Icon(Icons.bluetooth_connected)
                       : const Icon(Icons.bluetooth),
-                  onTap: _connectedHandle == null ? () => _connect(adapter) : null,
+                  onTap: _connectedHandle == null
+                      ? () => _connect(adapter)
+                      : null,
                 );
               },
             ),
