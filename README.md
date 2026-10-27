@@ -12,13 +12,22 @@ Every command passes the caller-supplied policy before it is written, and
 the library additionally rejects on its own, regardless of that policy:
 
 - any service other than mode 01 reads, UDS ReadDataByIdentifier (`0x22`),
-  and adapter `AT`/`ST` commands,
+  and an explicit, fixed allow-list of adapter `AT`/`ST` commands,
 - the VIN DIDs `F190` and `F802`,
 - the ECU serial number `F18C`.
 
 No write, clear-DTC, routine, security-access, session-control or reset
 service can ever be reached through this library. Callers are expected to
 supply a stricter allow-list on top of this hard block, not a looser one.
+
+The adapter allow-list is exact, not a bare `AT`/`ST` prefix check: STN-chip
+`ST` commands can transmit arbitrary CAN frames (`STPX`) or rewrite
+persistent adapter settings (`STSBR`), and ELM `ATPP` writes programmable
+parameters, so a prefix match alone would defeat the guarantee above. Only
+query/configuration commands with a bounded argument shape are allowed
+(`ATZ`, `ATE0`/`1`, `ATSP0`–`ATSPC`, `ATSH`/`ATCRA`/`ATCF`/`ATCM`/`ATFCSH`
+with a 3- or 8-hex-digit CAN ID, `STI`, `STDI`, and similar) — see
+`lib/src/guard.dart` / `HardGuard.kt` for the full list.
 
 This is implemented as two layers, each available on both Dart (`HardGuard`,
 `CommandPolicy`, `GuardedCommandFilter` in `lib/src/guard.dart`) and Kotlin
