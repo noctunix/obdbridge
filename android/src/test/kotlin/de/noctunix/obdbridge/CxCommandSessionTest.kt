@@ -815,6 +815,58 @@ class CxCommandSessionTest {
     }
 
     @Test
+    fun cancelOfOnlyQueuedCommandsNeverClearsAnAlreadyRequiredResync() {
+        val transport = FakeCxCommandTransport()
+        val clock = FakeCxCommandClock()
+        val session = newSession(transport, clock)
+        session.configureResync(listOf(alwaysOk("ATZ")), 1_000L) { }
+
+        // A disconnect with a command actually active requires a resync, same as a timeout, but
+        // — unlike a timeout — starts no quiet wait of its own (see `onDisconnected`'s own doc):
+        // this is deliberately the "resync already required, nothing currently quiescing or
+        // active" state the next `cancel()` call below must leave untouched.
+        session.execute("22F4A6", 1_000L) { }
+        session.onDisconnected()
+
+        // A plain command queued after that stays blocked behind the requirement — it never
+        // becomes active, so cancelling it finds nothing active and nothing quiescing either.
+        val queuedResults = mutableListOf<CxCommandResult>()
+        session.execute("ATRV", 1_000L) { queuedResults.add(it) }
+        session.cancel()
+        assertEquals(CxCommandOutcome.CANCELLED, queuedResults.single().outcome)
+
+        // The resync requirement from the earlier disconnect must have survived this cancel —
+        // onConnected() still finds one pending and actually starts the quiet-wait-then-resync
+        // cycle, rather than having been wrongly cleared by a cancel that only ever touched a
+        // command which had never been written at all.
+        session.onConnected()
+        clock.fireNextDue() // the quiet wait elapses, the resync step ("ATZ") is written
+        assertEquals(listOf("22F4A6\r", "ATZ\r"), transport.writes)
+    }
+
+    @Test
+    fun teardownRequiresAResyncBeforeInvokingCallbacksSoAReactingCallbackSeesItAlreadySet() {
+        val transport = FakeCxCommandTransport()
+        val clock = FakeCxCommandClock()
+        val session = newSession(transport, clock)
+        session.configureResync(listOf(alwaysOk("ATZ")), 1_000L) { }
+
+        // The active command's own callback reacts to the cancellation by immediately calling
+        // onConnected() — this only starts the quiet-wait-then-resync cycle if `resyncRequired`
+        // is already `true` by the time this callback runs, which `teardown` must guarantee by
+        // setting it *before* invoking any callback, not after.
+        session.execute("22F4A6", 1_000L) { session.onConnected() }
+        session.cancel()
+
+        // A quiet wait (plus its overall deadline) is now pending — proof that `onConnected()`,
+        // called from inside the very callback `cancel()`'s teardown invoked, already saw
+        // `resyncRequired == true` rather than being silently ignored as "nothing required".
+        assertEquals(2, clock.pendingCount)
+        clock.fireNextDue() // the quiet wait elapses
+        assertEquals(listOf("22F4A6\r", "ATZ\r"), transport.writes)
+    }
+
+    @Test
     fun aFreshExecuteCallMadeFromWithinATeardownCallbackGetsTheSameOutcomeInsteadOfBeingQueued() {
         val transport = FakeCxCommandTransport()
         val session = newSession(transport)

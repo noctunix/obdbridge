@@ -296,7 +296,11 @@ class CxCommandSession(
      * resync was already waiting out its quiet period, the same resync requirement as a timeout
      * applies — cancelling the bookkeeping does not stop whatever the adapter is already in the
      * middle of sending — but, like [onDisconnected], starts no timer of its own; call
-     * [onConnected] (the connection is presumably still up after a mere [cancel]) to resume. */
+     * [onConnected] (the connection is presumably still up after a mere [cancel]) to resume.
+     * Cancelling only commands still queued — nothing actually written, no resync quiescing —
+     * does not itself require a resync; it also never *clears* one already required, which some
+     * earlier failure set before this call: [cancel] can only ever add that requirement, never
+     * remove it. */
     @Synchronized
     fun cancel() = teardown(CxCommandOutcome.CANCELLED)
 
