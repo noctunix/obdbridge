@@ -2,6 +2,11 @@ include: package:flutter_lints/flutter.yaml
 
 analyzer:
   exclude:
+    - "**/*.g.dart"
+    # Pigeon codegen input, consumed by the pigeon tool, not shipped; it
+    # imports package:pigeon, which is intentionally not a dependency of
+    # this package.
+    - "pigeons/**"
     - build/**
     - android/**
     - ios/**
