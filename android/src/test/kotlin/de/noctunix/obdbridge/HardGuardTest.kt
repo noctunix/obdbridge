@@ -1,9 +1,8 @@
 package de.noctunix.obdbridge
 
 import org.json.JSONArray
-import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.DynamicTest
-import org.junit.jupiter.api.TestFactory
+import org.junit.Assert.assertTrue
+import org.junit.Test
 import java.io.File
 
 class HardGuardTest {
@@ -30,16 +29,16 @@ class HardGuardTest {
         }
     }
 
-    @TestFactory
-    fun sharedVectors(): List<DynamicTest> =
-        loadVectors().map { (command, allowed, reason) ->
-            DynamicTest.dynamicTest("${if (allowed) "allows" else "rejects"} \"$command\" ($reason)") {
-                val result = HardGuard.check(command)
-                if (allowed) {
-                    assertTrue(result is GuardResult.Allowed, "expected \"$command\" to be allowed, got $result")
-                } else {
-                    assertTrue(result is GuardResult.Rejected, "expected \"$command\" to be rejected, got $result")
-                }
+    @Test
+    fun sharedVectors() {
+        for ((command, allowed, reason) in loadVectors()) {
+            val result = HardGuard.check(command)
+            val message = "\"$command\" ($reason): expected ${if (allowed) "Allowed" else "Rejected"}, got $result"
+            if (allowed) {
+                assertTrue(message, result is GuardResult.Allowed)
+            } else {
+                assertTrue(message, result is GuardResult.Rejected)
             }
         }
+    }
 }

@@ -1,0 +1,47 @@
+{
+  "cases": [
+    {
+      "name": "ok_with_echo_single_notification",
+      "command": "ATZ",
+      "notificationsHex": ["41545a0d4f4b0d3e"],
+      "complete": true,
+      "expectedResponse": "OK"
+    },
+    {
+      "name": "ok_no_echo_single_notification",
+      "command": "ATE0",
+      "notificationsHex": ["4f4b0d3e"],
+      "complete": true,
+      "expectedResponse": "OK"
+    },
+    {
+      "name": "multi_line_response",
+      "command": "22F4A6",
+      "notificationsHex": ["3232463441360d3632463441360d30310d3e"],
+      "complete": true,
+      "expectedResponse": "62F4A6\n01"
+    },
+    {
+      "name": "fragmented_across_three_notifications",
+      "command": "ATZ",
+      "notificationsHex": ["4154", "5a0d4f", "4b0d3e"],
+      "complete": true,
+      "expectedResponse": "OK"
+    },
+    {
+      "name": "two_frames_one_packet",
+      "command": "ATE0",
+      "notificationsHex": ["4f4b0d3e4e4f20444154410d3e"],
+      "complete": true,
+      "expectedResponse": "OK",
+      "trailingDiscardedHex": "4e4f20444154410d3e"
+    },
+    {
+      "name": "missing_prompt",
+      "command": "ATE0",
+      "notificationsHex": ["4f4b0d"],
+      "complete": false,
+      "expectedResponse": null
+    }
+  ]
+}
