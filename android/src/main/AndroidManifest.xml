@@ -7,6 +7,9 @@
          alongside FOREGROUND_SERVICE itself. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Only actually held when a caller opts a recording into
+         ObdRecordingOptionsMessage.holdWakeLock (CxRecordingService). -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Scanning for and connecting to the adapter (CxBleClient.kt). API 31+ needs the
          two dedicated Bluetooth runtime permissions below; `neverForLocation` is correct

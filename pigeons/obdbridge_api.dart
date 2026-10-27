@@ -319,6 +319,30 @@ class ObdBridgeConfigMessage {
   String bufferFormatId;
 }
 
+/// Caller-chosen behaviour for one recording, independent of [ObdPlanMessage]
+/// (which only ever carries vehicle-read content, never operational
+/// policy).
+class ObdRecordingOptionsMessage {
+  ObdRecordingOptionsMessage({
+    this.holdWakeLock = false,
+    this.resumeAfterSystemKill = false,
+  });
+
+  /// Holds a `PARTIAL_WAKE_LOCK` for the recording's lifetime when `true`,
+  /// released on every exit path (stop, idle stop, max duration, error,
+  /// service destroy). Default `false`: a recording otherwise relies on the
+  /// foreground service alone, which keeps the process alive but does not
+  /// keep the CPU awake under Doze/screen-off.
+  bool holdWakeLock;
+
+  /// Reserved for a future actual resume-after-kill implementation; not yet
+  /// honored. `CxRecordingService` has no self-restart today (see its own
+  /// class doc) — a process kill always ends an abandoned recording as
+  /// `interrupted` via the restart marker, regardless of this flag. Default
+  /// `false` matches that existing, unconditional behaviour.
+  bool resumeAfterSystemKill;
+}
+
 /// Starts a buffered recording. [sessionId] is a UUIDv7 minted by the
 /// caller; [bufferFilePath] is likewise chosen by the caller (native only
 /// appends to it). [plan] carries the same compiled, policy-checked plan
@@ -332,6 +356,7 @@ class ObdStartRecordingRequest {
     required this.bufferFilePath,
     required this.startedAtEpochMs,
     required this.plan,
+    required this.options,
     this.notification,
   });
 
@@ -340,6 +365,7 @@ class ObdStartRecordingRequest {
   String bufferFilePath;
   int startedAtEpochMs;
   ObdPlanMessage plan;
+  ObdRecordingOptionsMessage options;
 
   /// `null` only where the platform would never show a notification at all —
   /// Android's foreground-service requirement means this is in practice

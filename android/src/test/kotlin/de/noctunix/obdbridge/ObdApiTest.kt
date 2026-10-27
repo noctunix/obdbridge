@@ -148,6 +148,9 @@ private fun limits(maxReadsPerSecond: Long = 10_000) = ObdLimitsMessage(
     maxBufferBytes = Long.MAX_VALUE,
 )
 
+private fun testRecordingOptions(holdWakeLock: Boolean = false) =
+    ObdRecordingOptionsMessage(holdWakeLock = holdWakeLock, resumeAfterSystemKill = false)
+
 private fun testPlan(signalId: String = "hvEnergyContent", intervalMs: Long = 1000) = ObdPlanMessage(
     planId = "test-plan",
     planVersion = 1,
@@ -673,6 +676,7 @@ class ObdApiTest {
             bufferFilePath = "/tmp/does-not-matter.jsonl",
             startedAtEpochMs = 0L,
             plan = testPlan(),
+            options = testRecordingOptions(),
         )
         val recordingAccepted = awaitResult<Boolean> { api.startRecording(request, it) }
         assertTrue("a connected recording request should be accepted", recordingAccepted)
@@ -873,6 +877,7 @@ class ObdApiTest {
             bufferFilePath = "/tmp/does-not-matter.jsonl",
             startedAtEpochMs = 0L,
             plan = testPlan(),
+            options = testRecordingOptions(),
         )
         awaitResult<Boolean> { api.startRecording(request, it) }
 

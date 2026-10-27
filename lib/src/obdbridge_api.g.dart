@@ -933,6 +933,64 @@ class ObdBridgeConfigMessage {
   int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
 }
 
+/// Caller-chosen behaviour for one recording, independent of [ObdPlanMessage]
+/// (which only ever carries vehicle-read content, never operational
+/// policy).
+class ObdRecordingOptionsMessage {
+  ObdRecordingOptionsMessage({
+    this.holdWakeLock = false,
+    this.resumeAfterSystemKill = false,
+  });
+
+  /// Holds a `PARTIAL_WAKE_LOCK` for the recording's lifetime when `true`,
+  /// released on every exit path (stop, idle stop, max duration, error,
+  /// service destroy). Default `false`: a recording otherwise relies on the
+  /// foreground service alone, which keeps the process alive but does not
+  /// keep the CPU awake under Doze/screen-off.
+  bool holdWakeLock;
+
+  /// Reserved for a future actual resume-after-kill implementation; not yet
+  /// honored. `CxRecordingService` has no self-restart today (see its own
+  /// class doc) — a process kill always ends an abandoned recording as
+  /// `interrupted` via the restart marker, regardless of this flag. Default
+  /// `false` matches that existing, unconditional behaviour.
+  bool resumeAfterSystemKill;
+
+  List<Object?> _toList() {
+    return <Object?>[holdWakeLock, resumeAfterSystemKill];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static ObdRecordingOptionsMessage decode(Object result) {
+    result as List<Object?>;
+    return ObdRecordingOptionsMessage(
+      holdWakeLock: result[0]! as bool,
+      resumeAfterSystemKill: result[1]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ObdRecordingOptionsMessage ||
+        other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(holdWakeLock, other.holdWakeLock) &&
+        _deepEquals(resumeAfterSystemKill, other.resumeAfterSystemKill);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+}
+
 /// Starts a buffered recording. [sessionId] is a UUIDv7 minted by the
 /// caller; [bufferFilePath] is likewise chosen by the caller (native only
 /// appends to it). [plan] carries the same compiled, policy-checked plan
@@ -946,6 +1004,7 @@ class ObdStartRecordingRequest {
     required this.bufferFilePath,
     required this.startedAtEpochMs,
     required this.plan,
+    required this.options,
     this.notification,
   });
 
@@ -959,6 +1018,8 @@ class ObdStartRecordingRequest {
 
   ObdPlanMessage plan;
 
+  ObdRecordingOptionsMessage options;
+
   /// `null` only where the platform would never show a notification at all —
   /// Android's foreground-service requirement means this is in practice
   /// always set there.
@@ -971,6 +1032,7 @@ class ObdStartRecordingRequest {
       bufferFilePath,
       startedAtEpochMs,
       plan,
+      options,
       notification,
     ];
   }
@@ -987,7 +1049,8 @@ class ObdStartRecordingRequest {
       bufferFilePath: result[2]! as String,
       startedAtEpochMs: result[3]! as int,
       plan: result[4]! as ObdPlanMessage,
-      notification: result[5] as ObdRecordingNotificationMessage?,
+      options: result[5]! as ObdRecordingOptionsMessage,
+      notification: result[6] as ObdRecordingNotificationMessage?,
     );
   }
 
@@ -1006,6 +1069,7 @@ class ObdStartRecordingRequest {
         _deepEquals(bufferFilePath, other.bufferFilePath) &&
         _deepEquals(startedAtEpochMs, other.startedAtEpochMs) &&
         _deepEquals(plan, other.plan) &&
+        _deepEquals(options, other.options) &&
         _deepEquals(notification, other.notification);
   }
 
@@ -1160,11 +1224,14 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is ObdBridgeConfigMessage) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    } else if (value is ObdStartRecordingRequest) {
+    } else if (value is ObdRecordingOptionsMessage) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingStateMessage) {
+    } else if (value is ObdStartRecordingRequest) {
       buffer.putUint8(147);
+      writeValue(buffer, value.encode());
+    } else if (value is ObdRecordingStateMessage) {
+      buffer.putUint8(148);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1219,8 +1286,10 @@ class _PigeonCodec extends StandardMessageCodec {
       case 145:
         return ObdBridgeConfigMessage.decode(readValue(buffer)!);
       case 146:
-        return ObdStartRecordingRequest.decode(readValue(buffer)!);
+        return ObdRecordingOptionsMessage.decode(readValue(buffer)!);
       case 147:
+        return ObdStartRecordingRequest.decode(readValue(buffer)!);
+      case 148:
         return ObdRecordingStateMessage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);

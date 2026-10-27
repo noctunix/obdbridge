@@ -62,6 +62,20 @@ file the restart marker uses, the buffer header's `format` identifier) are
 supplied once via `NativeObdApi.configure` — see `ObdBridgeConfigMessage`'s
 doc comment.
 
+Each `ObdStartRecordingRequest` also carries an `ObdRecordingOptionsMessage`:
+
+- `holdWakeLock` (default `false`): holds a `PARTIAL_WAKE_LOCK` for the
+  recording's lifetime, released on every exit path (stop, idle stop, max
+  duration, error, service destroy). The foreground service alone keeps the
+  process alive but not necessarily the CPU awake under Doze/screen-off;
+  this is the caller's opt-in to the stronger guarantee, at the usual
+  wake-lock battery cost.
+- `resumeAfterSystemKill` (default `false`): reserved for a future actual
+  resume-after-process-kill feature, not yet honored —
+  `CxRecordingService` never self-restarts today, and a process kill
+  always ends an abandoned recording as `interrupted` via the restart
+  marker regardless of this flag.
+
 Android only; there is no iOS implementation yet.
 
 ## Third-party licences

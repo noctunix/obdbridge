@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
@@ -66,6 +67,12 @@ class CxRecordingService : Service() {
     private var request: ObdStartRecordingRequest? = null
     private var adapterHandle: String? = null
     private var reconnectAttempts = 0
+
+    /** Held only when [ObdRecordingOptionsMessage.holdWakeLock] asked for it, for exactly the
+     * lifetime of the recording that requested it — acquired in [beginRecording], released by
+     * [releaseWakeLock] on every exit path [endRecordingInternal] covers (stop, idle stop, max
+     * duration, error, service destroy), never elsewhere. */
+    private var wakeLock: PowerManager.WakeLock? = null
 
     /** `true` from the moment a connection loss or a consecutive-failure budget runs out until
      * the reconnect it triggers either succeeds or gives up for good. Guards against the two
@@ -201,6 +208,7 @@ class CxRecordingService : Service() {
         writeError = null
         reconnectAttempts = 0
         reconnectInFlight = false
+        acquireWakeLockIfRequested(startRequest.options.holdWakeLock)
 
         obd.attachRecordingOwner(this)
         obd.setRecordingDisconnectListener { onConnectionLost(obd) }
@@ -407,6 +415,31 @@ class CxRecordingService : Service() {
         }
     }
 
+    // ── wake lock ────────────────────────────────────────────────────────
+
+    /** A no-op unless [hold] is `true` ([ObdRecordingOptionsMessage.holdWakeLock]) — a recording
+     * otherwise relies on the foreground service alone, which keeps the process alive but not
+     * necessarily the CPU awake under Doze/screen-off. Not reference-counted: exactly one
+     * recording ever holds this service's lock at a time, so a plain acquire/release pair is
+     * enough. Internal rather than private so `CxRecordingServiceTest` can exercise it directly,
+     * the same way `ObdApi` exposes internal hooks for its own tests, without needing to drive
+     * the whole `ObdApi`/BLE-backed recording start through Robolectric. */
+    internal fun acquireWakeLockIfRequested(hold: Boolean) {
+        if (!hold) return
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    internal fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
+
+    internal fun isWakeLockHeld(): Boolean = wakeLock?.isHeld ?: false
+
     // ── stop ─────────────────────────────────────────────────────────────
 
     /** The only caller-visible stop entry point — both [ObdApi.stopRecording] and the
@@ -427,6 +460,7 @@ class CxRecordingService : Service() {
     private fun endRecordingInternal(endPhase: CxRecordingPhase, reason: String, writeFailed: Boolean = false) {
         if (sessionId == null) return
         handler.removeCallbacksAndMessages(null)
+        releaseWakeLock()
         val endedPoller = poller
         poller = null
         endedPoller?.stop()
@@ -555,6 +589,7 @@ class CxRecordingService : Service() {
         private const val NOTIFICATION_CHANNEL_ID = "de.noctunix.obdbridge.recording"
         private const val NOTIFICATION_ID = 4781
         private const val ACTION_STOP = "de.noctunix.obdbridge.action.STOP_OBD_RECORDING"
+        private const val WAKE_LOCK_TAG = "de.noctunix.obdbridge:recording"
 
         /** The literal strings `ObdTransportStatusMessage`'s Dart enum uses, not a Kotlin enum
          * name — see `CxBufferWriter`'s own class doc on why the buffer must match that spelling. */

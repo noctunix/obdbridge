@@ -969,6 +969,64 @@ data class ObdBridgeConfigMessage (
 }
 
 /**
+ * Caller-chosen behaviour for one recording, independent of [ObdPlanMessage]
+ * (which only ever carries vehicle-read content, never operational
+ * policy).
+ *
+ * Generated class from Pigeon that represents data sent in messages.
+ */
+data class ObdRecordingOptionsMessage (
+  /**
+   * Holds a `PARTIAL_WAKE_LOCK` for the recording's lifetime when `true`,
+   * released on every exit path (stop, idle stop, max duration, error,
+   * service destroy). Default `false`: a recording otherwise relies on the
+   * foreground service alone, which keeps the process alive but does not
+   * keep the CPU awake under Doze/screen-off.
+   */
+  val holdWakeLock: Boolean,
+  /**
+   * Reserved for a future actual resume-after-kill implementation; not yet
+   * honored. `CxRecordingService` has no self-restart today (see its own
+   * class doc) — a process kill always ends an abandoned recording as
+   * `interrupted` via the restart marker, regardless of this flag. Default
+   * `false` matches that existing, unconditional behaviour.
+   */
+  val resumeAfterSystemKill: Boolean
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ObdRecordingOptionsMessage {
+      val holdWakeLock = pigeonVar_list[0] as Boolean
+      val resumeAfterSystemKill = pigeonVar_list[1] as Boolean
+      return ObdRecordingOptionsMessage(holdWakeLock, resumeAfterSystemKill)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      holdWakeLock,
+      resumeAfterSystemKill,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ObdRecordingOptionsMessage
+    return ObdApiPigeonUtils.deepEquals(this.holdWakeLock, other.holdWakeLock) && ObdApiPigeonUtils.deepEquals(this.resumeAfterSystemKill, other.resumeAfterSystemKill)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.holdWakeLock)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.resumeAfterSystemKill)
+    return result
+  }
+}
+
+/**
  * Starts a buffered recording. [sessionId] is a UUIDv7 minted by the
  * caller; [bufferFilePath] is likewise chosen by the caller (native only
  * appends to it). [plan] carries the same compiled, policy-checked plan
@@ -984,6 +1042,7 @@ data class ObdStartRecordingRequest (
   val bufferFilePath: String,
   val startedAtEpochMs: Long,
   val plan: ObdPlanMessage,
+  val options: ObdRecordingOptionsMessage,
   /**
    * `null` only where the platform would never show a notification at all —
    * Android's foreground-service requirement means this is in practice
@@ -999,8 +1058,9 @@ data class ObdStartRecordingRequest (
       val bufferFilePath = pigeonVar_list[2] as String
       val startedAtEpochMs = pigeonVar_list[3] as Long
       val plan = pigeonVar_list[4] as ObdPlanMessage
-      val notification = pigeonVar_list[5] as ObdRecordingNotificationMessage?
-      return ObdStartRecordingRequest(sessionId, vehicleId, bufferFilePath, startedAtEpochMs, plan, notification)
+      val options = pigeonVar_list[5] as ObdRecordingOptionsMessage
+      val notification = pigeonVar_list[6] as ObdRecordingNotificationMessage?
+      return ObdStartRecordingRequest(sessionId, vehicleId, bufferFilePath, startedAtEpochMs, plan, options, notification)
     }
   }
   fun toList(): List<Any?> {
@@ -1010,6 +1070,7 @@ data class ObdStartRecordingRequest (
       bufferFilePath,
       startedAtEpochMs,
       plan,
+      options,
       notification,
     )
   }
@@ -1021,7 +1082,7 @@ data class ObdStartRecordingRequest (
       return true
     }
     val other = other as ObdStartRecordingRequest
-    return ObdApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && ObdApiPigeonUtils.deepEquals(this.vehicleId, other.vehicleId) && ObdApiPigeonUtils.deepEquals(this.bufferFilePath, other.bufferFilePath) && ObdApiPigeonUtils.deepEquals(this.startedAtEpochMs, other.startedAtEpochMs) && ObdApiPigeonUtils.deepEquals(this.plan, other.plan) && ObdApiPigeonUtils.deepEquals(this.notification, other.notification)
+    return ObdApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && ObdApiPigeonUtils.deepEquals(this.vehicleId, other.vehicleId) && ObdApiPigeonUtils.deepEquals(this.bufferFilePath, other.bufferFilePath) && ObdApiPigeonUtils.deepEquals(this.startedAtEpochMs, other.startedAtEpochMs) && ObdApiPigeonUtils.deepEquals(this.plan, other.plan) && ObdApiPigeonUtils.deepEquals(this.options, other.options) && ObdApiPigeonUtils.deepEquals(this.notification, other.notification)
   }
 
   override fun hashCode(): Int {
@@ -1031,6 +1092,7 @@ data class ObdStartRecordingRequest (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.bufferFilePath)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.startedAtEpochMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.plan)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.options)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.notification)
     return result
   }
@@ -1200,10 +1262,15 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
       }
       146.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdStartRecordingRequest.fromList(it)
+          ObdRecordingOptionsMessage.fromList(it)
         }
       }
       147.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          ObdStartRecordingRequest.fromList(it)
+        }
+      }
+      148.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
           ObdRecordingStateMessage.fromList(it)
         }
@@ -1281,12 +1348,16 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ObdStartRecordingRequest -> {
+      is ObdRecordingOptionsMessage -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingStateMessage -> {
+      is ObdStartRecordingRequest -> {
         stream.write(147)
+        writeValue(stream, value.toList())
+      }
+      is ObdRecordingStateMessage -> {
+        stream.write(148)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
