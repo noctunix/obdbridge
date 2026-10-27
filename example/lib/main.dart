@@ -29,8 +29,15 @@ class ScanAndConnectScreen extends StatefulWidget {
   State<ScanAndConnectScreen> createState() => _ScanAndConnectScreenState();
 }
 
+/// This example never issues a vehicle command (see the screen's own doc
+/// comment above), so its policy has nothing to allow.
+class _DenyAllCommandPolicy implements CommandPolicy {
+  @override
+  bool allows(String normalizedCommand) => false;
+}
+
 class _ScanAndConnectScreenState extends State<ScanAndConnectScreen> {
-  final _api = NativeObdApi();
+  final _api = ObdBridge(_DenyAllCommandPolicy());
 
   bool _configured = false;
   bool _scanning = false;

@@ -38,6 +38,18 @@ allow-list regardless of what the policy permits. A command only reaches the
 adapter once both layers have allowed it. Both implementations are checked
 against the same fixtures in `test/fixtures/guard_vectors.json`.
 
+On the Dart side this is enforced, not just documented: `ObdBridge` (in
+`lib/src/obdbridge.dart`) is the only supported entry point into this
+package. `NativeObdApi` itself is not exported from `package:obdbridge/obdbridge.dart`,
+so a consumer cannot reach it, and therefore cannot bypass the policy it was
+constructed with. `ObdBridge` runs every command a plan carries — `init`,
+`resync`, each module's `setup` and every step's `command` — through
+`GuardedCommandFilter` before `startLive`/`startRecording`; a plan with any
+rejected command throws `ObdBridgeCommandRejectedException`, listing every
+rejected command, without calling native at all. Native's own `HardGuard`
+check immediately before writing stays in place regardless — this is an
+earlier, additional gate, not a replacement for it.
+
 ## Scope
 
 - BLE connection (Android, via the Nordic Android BLE Library): scan, bond,
