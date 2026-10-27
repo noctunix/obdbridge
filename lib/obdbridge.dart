@@ -1,6 +1,7 @@
 export 'src/elm_response_parser.dart';
 export 'src/guard.dart';
 export 'src/module_setup.dart';
+export 'src/obdbridge_api.g.dart';
 
 /// Current obdbridge package version.
 ///

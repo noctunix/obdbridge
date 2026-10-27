@@ -38,18 +38,44 @@ allow-list regardless of what the policy permits. A command only reaches the
 adapter once both layers have allowed it. Both implementations are checked
 against the same fixtures in `test/fixtures/guard_vectors.json`.
 
-## Planned scope
+## Scope
 
-- BLE connection: scan, bond, GATT, MTU negotiation, teardown.
-- A serialized command session: framing to `>`, overflow handling, resync.
-- A policy interface for callers to restrict commands further.
-- A foreground recording service with reconnect/backoff and wake lock.
-- A crash-safe JSONL buffer for recorded sessions.
-- An ELM/ISO-TP response parser.
+- BLE connection (Android, via the Nordic Android BLE Library): scan, bond,
+  GATT, MTU negotiation, teardown (`CxBleClient`).
+- A serialized command session: framing to `>`, overflow handling, resync
+  (`CxCommandSession`).
+- The two-layer guard above (`CommandPolicy`, `HardGuard`).
+- Plan execution at a cadence, live or buffered (`CxPoller`).
+- A foreground recording service with reconnect/backoff
+  (`CxRecordingService`); a crash-safe JSONL buffer for recorded sessions
+  (`CxBufferWriter`), surviving a process kill via a restart marker
+  (`CxRecordingRestartMarker`).
+- An ELM/ISO-TP response parser (`ElmResponseParser`) and a generic,
+  profile-free module-setup builder (`ObdProtocol`,
+  `buildModuleSetupCommands`) — this package has no vehicle, profile or DID
+  knowledge; a consumer supplies its own command plan and policy.
+- The `NativeObdApi`/`ObdEventsApi` Pigeon contract (`pigeons/obdbridge_api.dart`).
+
+Caller-specific values this package cannot hardcode (the activity a
+recording notification's tap opens, its small icon, the `SharedPreferences`
+file the restart marker uses, the buffer header's `format` identifier) are
+supplied once via `NativeObdApi.configure` — see `ObdBridgeConfigMessage`'s
+doc comment.
+
+Android only; there is no iOS implementation yet.
+
+## Third-party licences
+
+The Nordic Android BLE Library (`no.nordicsemi.android:ble`) is
+BSD-3-Clause; its licence text ships as
+`android/src/main/assets/licenses/NORDIC-ANDROID-BLE-LICENSE.txt`.
 
 ## Status
 
-Skeleton. No BLE code, no command execution yet.
+Transport layer and recording service implemented and unit-tested
+(JVM/Robolectric on the Kotlin side, `flutter test` on the Dart side); not
+yet verified against a real adapter from this repo (see
+`CxRecordingService`'s own class doc on what JVM tests cannot exercise).
 
 ## Depending on this package
 

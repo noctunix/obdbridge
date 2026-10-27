@@ -14,8 +14,9 @@ final class IsoTpMessage extends ParsedResponse {
 
   @override
   bool operator ==(Object other) {
-    if (other is! IsoTpMessage || other.bytes.length != bytes.length)
+    if (other is! IsoTpMessage || other.bytes.length != bytes.length) {
       return false;
+    }
     for (var i = 0; i < bytes.length; i++) {
       if (other.bytes[i] != bytes[i]) return false;
     }
@@ -284,8 +285,9 @@ class ElmResponseParser {
       );
     }
     final bytes = accumulator.data!;
-    if (bytes.isEmpty)
+    if (bytes.isEmpty) {
       return const MalformedResponse('reassembled message is empty');
+    }
     if (bytes[0] == 0x7F) {
       if (bytes.length < 3) {
         return const MalformedResponse(
