@@ -8,6 +8,14 @@ of what a vehicle is asked.
 
 ## Read-only guarantee
 
+`HardGuard` performs no normalization: a command is only ever accepted if
+it is already canonical — non-empty, and composed only of `0`-`9`, `A`-`Z`
+and `@`. Whitespace, CR/LF, a BOM, lowercase letters, or any other
+character reject the command outright, before the allow-list below is
+even consulted. This library's own allow-list is intentionally broader
+than any specific app's policy; the caller-supplied `CommandPolicy`
+remains the authoritative, narrower layer on top of it.
+
 Every command passes the caller-supplied policy before it is written, and
 the library additionally rejects on its own, regardless of that policy:
 
@@ -112,7 +120,7 @@ dependencies:
   obdbridge:
     git:
       url: https://github.com/noctunix/obdbridge.git
-      ref: v0.1.0
+      ref: v0.1.1
 ```
 
 For local development against a checked-out copy, add a gitignored

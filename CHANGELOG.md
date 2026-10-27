@@ -1,3 +1,14 @@
+## 0.1.1
+
+- Security fix: `HardGuard` no longer normalizes a command before checking it
+  (whitespace stripping, upper-casing). A command is only accepted if it is
+  already canonical (non-empty, only `0`-`9`, `A`-`Z` and `@`); anything else,
+  including an embedded CR/LF that could smuggle a second command onto the
+  wire past the single terminator a command session appends, is rejected
+  outright. `CxCommandSession` also gained a defensive check rejecting any
+  command that still contains `\r`/`\n` right before it would otherwise be
+  written.
+
 ## 0.1.0
 
 - BLE connection to ELM327/STN UART adapters (scan, bond, GATT, MTU, teardown).
