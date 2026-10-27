@@ -149,8 +149,8 @@ private fun limits(maxReadsPerSecond: Long = 10_000) = ObdLimitsMessage(
 )
 
 private fun testPlan(signalId: String = "hvEnergyContent", intervalMs: Long = 1000) = ObdPlanMessage(
-    profileId = "test-profile",
-    profileVersion = 1,
+    planId = "test-plan",
+    planVersion = 1,
     formatVersion = 1,
     init = listOf("ATZ", "ATE0"),
     resync = listOf("ATZ", "ATE0"),
@@ -274,8 +274,8 @@ class ObdApiTest {
         awaitResult<ObdLinkStateMessage> { api.connect("handle-1", it) }
 
         val plan = ObdPlanMessage(
-            profileId = "test-profile",
-            profileVersion = 1,
+            planId = "test-plan",
+            planVersion = 1,
             formatVersion = 1,
             init = listOf("ATZ"),
             resync = listOf("ATZ"),
@@ -314,8 +314,8 @@ class ObdApiTest {
         // to be read as fast as their own `intervalMs` allows (0) — the only thing that can still
         // separate them is the plan's global `maxReadsPerSecond: 1`, i.e. one read every 1000 ms.
         val plan = ObdPlanMessage(
-            profileId = "test-profile",
-            profileVersion = 1,
+            planId = "test-plan",
+            planVersion = 1,
             formatVersion = 1,
             init = listOf("ATZ"),
             resync = listOf("ATZ"),
@@ -422,8 +422,8 @@ class ObdApiTest {
         awaitResult<ObdLinkStateMessage> { api.connect("handle-1", it) }
 
         val plan = ObdPlanMessage(
-            profileId = "test-profile",
-            profileVersion = 1,
+            planId = "test-plan",
+            planVersion = 1,
             formatVersion = 1,
             init = listOf("ATZ", "ATE0"),
             // Deliberately different from `init` (an extra step) so the test can tell whether
@@ -465,8 +465,8 @@ class ObdApiTest {
         awaitResult<ObdLinkStateMessage> { api.connect("handle-1", it) }
 
         val plan = ObdPlanMessage(
-            profileId = "test-profile",
-            profileVersion = 1,
+            planId = "test-plan",
+            planVersion = 1,
             formatVersion = 1,
             init = listOf("ATZ"),
             resync = listOf("ATZ"),
@@ -538,8 +538,8 @@ class ObdApiTest {
         val clock = ManualCxCommandClock()
         val api = ObdApi(CxBleClient(io), clock)
         val plan = ObdPlanMessage(
-            profileId = "test-profile",
-            profileVersion = 1,
+            planId = "test-plan",
+            planVersion = 1,
             formatVersion = 1,
             init = listOf("ATZ"),
             resync = listOf("ATZ"),

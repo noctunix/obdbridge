@@ -660,8 +660,8 @@ data class ObdLimitsMessage (
  * Generated class from Pigeon that represents data sent in messages.
  */
 data class ObdPlanMessage (
-  val profileId: String,
-  val profileVersion: Long,
+  val planId: String,
+  val planVersion: Long,
   val formatVersion: Long,
   val init: List<String>,
   val resync: List<String>,
@@ -672,21 +672,21 @@ data class ObdPlanMessage (
  {
   companion object {
     fun fromList(pigeonVar_list: List<Any?>): ObdPlanMessage {
-      val profileId = pigeonVar_list[0] as String
-      val profileVersion = pigeonVar_list[1] as Long
+      val planId = pigeonVar_list[0] as String
+      val planVersion = pigeonVar_list[1] as Long
       val formatVersion = pigeonVar_list[2] as Long
       val init = pigeonVar_list[3] as List<String>
       val resync = pigeonVar_list[4] as List<String>
       val modules = pigeonVar_list[5] as List<ObdModuleMessage>
       val steps = pigeonVar_list[6] as List<ObdStepMessage>
       val limits = pigeonVar_list[7] as ObdLimitsMessage
-      return ObdPlanMessage(profileId, profileVersion, formatVersion, init, resync, modules, steps, limits)
+      return ObdPlanMessage(planId, planVersion, formatVersion, init, resync, modules, steps, limits)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
-      profileId,
-      profileVersion,
+      planId,
+      planVersion,
       formatVersion,
       init,
       resync,
@@ -703,13 +703,13 @@ data class ObdPlanMessage (
       return true
     }
     val other = other as ObdPlanMessage
-    return ObdApiPigeonUtils.deepEquals(this.profileId, other.profileId) && ObdApiPigeonUtils.deepEquals(this.profileVersion, other.profileVersion) && ObdApiPigeonUtils.deepEquals(this.formatVersion, other.formatVersion) && ObdApiPigeonUtils.deepEquals(this.init, other.init) && ObdApiPigeonUtils.deepEquals(this.resync, other.resync) && ObdApiPigeonUtils.deepEquals(this.modules, other.modules) && ObdApiPigeonUtils.deepEquals(this.steps, other.steps) && ObdApiPigeonUtils.deepEquals(this.limits, other.limits)
+    return ObdApiPigeonUtils.deepEquals(this.planId, other.planId) && ObdApiPigeonUtils.deepEquals(this.planVersion, other.planVersion) && ObdApiPigeonUtils.deepEquals(this.formatVersion, other.formatVersion) && ObdApiPigeonUtils.deepEquals(this.init, other.init) && ObdApiPigeonUtils.deepEquals(this.resync, other.resync) && ObdApiPigeonUtils.deepEquals(this.modules, other.modules) && ObdApiPigeonUtils.deepEquals(this.steps, other.steps) && ObdApiPigeonUtils.deepEquals(this.limits, other.limits)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
-    result = 31 * result + ObdApiPigeonUtils.deepHash(this.profileId)
-    result = 31 * result + ObdApiPigeonUtils.deepHash(this.profileVersion)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.planId)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.planVersion)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.formatVersion)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.init)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.resync)

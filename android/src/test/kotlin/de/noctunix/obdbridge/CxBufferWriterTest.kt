@@ -29,9 +29,8 @@ class CxBufferWriterTest {
         writer.writeHeader(
             sessionId = "session-1",
             bufferFormatId = "obdbridge-buffer",
-            profileId = "profile-1",
-            profileVersion = 3L,
-            profileFormatVersion = 1L,
+            planId = "plan-1",
+            planVersion = 3L,
             timebaseId = "tb-1",
             createdUtcMs = 1_700_000_000_000L,
         )
@@ -41,9 +40,8 @@ class CxBufferWriterTest {
         assertEquals("obdbridge-buffer", header.getString("format"))
         assertEquals(1, header.getInt("formatVersion"))
         assertEquals("session-1", header.getString("sessionId"))
-        assertEquals("profile-1", header.getString("profileId"))
-        assertEquals(3, header.getInt("profileVersion"))
-        assertEquals(1, header.getInt("profileFormatVersion"))
+        assertEquals("plan-1", header.getString("planId"))
+        assertEquals(3, header.getInt("planVersion"))
         assertEquals("tb-1", header.getString("timebaseId"))
         assertEquals(1_700_000_000_000L, header.getLong("createdUtcMs"))
     }
@@ -51,7 +49,7 @@ class CxBufferWriterTest {
     @Test
     fun sequenceIsGaplessAcrossSuccessiveExchanges() {
         val (file, writer) = newWriter()
-        writer.writeHeader("s", "fmt", "p", 1L, 1L, "tb", 0L)
+        writer.writeHeader("s", "fmt", "p", 1L, "tb", 0L)
 
         val first = writer.appendExchange(
             signalId = "a",
@@ -107,7 +105,7 @@ class CxBufferWriterTest {
     @Test
     fun aGapIsItsOwnLineNotAMissingSequence() {
         val (file, writer) = newWriter()
-        writer.writeHeader("s", "fmt", "p", 1L, 1L, "tb", 0L)
+        writer.writeHeader("s", "fmt", "p", 1L, "tb", 0L)
         writer.appendExchange("a", 0L, 0L, 0L, 0L, "tb", byteArrayOf(1), "ok")
         writer.appendGap("connection lost")
         writer.appendExchange("a", 0L, 0L, 0L, 0L, "tb", byteArrayOf(2), "ok")
@@ -130,7 +128,7 @@ class CxBufferWriterTest {
     @Test
     fun exceedingMaxBufferBytesSetsLimitReachedWithoutTruncatingWhatWasAlreadyWritten() {
         val (file, writer) = newWriter(maxBufferBytes = 1L) // the header line alone already exceeds this
-        writer.writeHeader("s", "fmt", "p", 1L, 1L, "tb", 0L)
+        writer.writeHeader("s", "fmt", "p", 1L, "tb", 0L)
         assertTrue("the header line already pushed bytesWritten past the 1-byte limit", writer.limitReached)
 
         // A further call after the limit is reached is a no-op: no new line, no sequence bump —
@@ -147,7 +145,7 @@ class CxBufferWriterTest {
     fun aWriteFailureSetsFailedAndStopsAcceptingFurtherAppends() {
         val file = tempFolder.newFile("buffer_failure.jsonl")
         val writer = CxBufferWriter(file.absolutePath, 1_000_000L)
-        writer.writeHeader("s", "fmt", "p", 1L, 1L, "tb", 0L)
+        writer.writeHeader("s", "fmt", "p", 1L, "tb", 0L)
         assertFalse(writer.failed)
 
         closeUnderlyingStream(writer)

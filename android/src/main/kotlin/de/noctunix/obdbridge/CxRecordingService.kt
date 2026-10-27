@@ -177,9 +177,8 @@ class CxRecordingService : Service() {
                 it.writeHeader(
                     sessionId = startRequest.sessionId,
                     bufferFormatId = config.bufferFormatId,
-                    profileId = plan.profileId,
-                    profileVersion = plan.profileVersion,
-                    profileFormatVersion = plan.formatVersion,
+                    planId = plan.planId,
+                    planVersion = plan.planVersion,
                     timebaseId = timebase.first,
                     createdUtcMs = startRequest.startedAtEpochMs,
                 )

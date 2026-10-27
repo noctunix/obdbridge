@@ -181,8 +181,8 @@ class ObdLimitsMessage {
 /// immediately before writing it — two independent gates, not one.
 class ObdPlanMessage {
   ObdPlanMessage({
-    required this.profileId,
-    required this.profileVersion,
+    required this.planId,
+    required this.planVersion,
     required this.formatVersion,
     required this.init,
     required this.resync,
@@ -191,8 +191,8 @@ class ObdPlanMessage {
     required this.limits,
   });
 
-  String profileId;
-  int profileVersion;
+  String planId;
+  int planVersion;
   int formatVersion;
   List<String> init;
   List<String> resync;

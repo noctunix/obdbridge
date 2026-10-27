@@ -14,8 +14,8 @@ import java.io.RandomAccessFile
  * Field names are deliberately full words (`sequence`, `requestStartedUtcMs`, `receivedUtcMs`,
  * `monotonicStartNs`, `durationNs`, `timebaseId`, `raw`, `transport`), not an abbreviated set —
  * the buffer is meant to be read by a later importer, not just this file. The header carries
- * [ObdPlanMessage]'s own identity as `profileId`/`profileVersion`/`profileFormatVersion`, and each
- * line identifies its step by `signalId` ([ObdStepMessage.signalId]).
+ * [ObdPlanMessage]'s own identity as `planId`/`planVersion`, and each line identifies its step by
+ * `signalId` ([ObdStepMessage.signalId]).
  *
  * [appendExchange]'s `raw` is the literal bytes [CxCommandResult.rawBytes] carried for that
  * attempt — the complete frame before the prompt on success, or whatever partial bytes had
@@ -63,22 +63,20 @@ class CxBufferWriter(path: String, private val maxBufferBytes: Long) : AutoClose
         gapCount = lastGapCount
     }
 
-    /** `{"format":<bufferFormatId>,"formatVersion":1,"sessionId":…,"profileId":…,
-     * "profileVersion":…,"profileFormatVersion":…,"timebaseId":…,"createdUtcMs":…}`. The
-     * top-level `formatVersion` is this JSONL shape's own version (always [FORMAT_VERSION]
-     * today); [profileFormatVersion] is a different number entirely — [ObdPlanMessage]'s own
-     * `formatVersion`, i.e. the wire-format version of the profile the plan was compiled from.
-     * [bufferFormatId] is caller-supplied ([ObdBridgeConfigMessage.bufferFormatId]) rather than a
-     * fixed string, so a caller that already shipped buffers under a different identifier (e.g.
-     * an app moving its own recorder onto this library) keeps using it and previously recorded
-     * buffers still import correctly. */
+    /** `{"format":<bufferFormatId>,"formatVersion":1,"sessionId":…,"planId":…,
+     * "planVersion":…,"timebaseId":…,"createdUtcMs":…}`. The top-level `formatVersion` is this
+     * JSONL shape's own version (always [FORMAT_VERSION] today), unrelated to [ObdPlanMessage]'s
+     * own `formatVersion` (the wire-format version of the plan itself), which this header does
+     * not carry at all. [bufferFormatId] is caller-supplied
+     * ([ObdBridgeConfigMessage.bufferFormatId]) rather than a fixed string, so a caller that
+     * already shipped buffers under a different identifier (e.g. an app moving its own recorder
+     * onto this library) keeps using it and previously recorded buffers still import correctly. */
     @Synchronized
     fun writeHeader(
         sessionId: String,
         bufferFormatId: String,
-        profileId: String,
-        profileVersion: Long,
-        profileFormatVersion: Long,
+        planId: String,
+        planVersion: Long,
         timebaseId: String,
         createdUtcMs: Long,
     ) {
@@ -87,9 +85,8 @@ class CxBufferWriter(path: String, private val maxBufferBytes: Long) : AutoClose
                 put("format", bufferFormatId)
                 put("formatVersion", FORMAT_VERSION)
                 put("sessionId", sessionId)
-                put("profileId", profileId)
-                put("profileVersion", profileVersion)
-                put("profileFormatVersion", profileFormatVersion)
+                put("planId", planId)
+                put("planVersion", planVersion)
                 put("timebaseId", timebaseId)
                 put("createdUtcMs", createdUtcMs)
             },

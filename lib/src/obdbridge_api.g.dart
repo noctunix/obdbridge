@@ -579,8 +579,8 @@ class ObdLimitsMessage {
 /// immediately before writing it — two independent gates, not one.
 class ObdPlanMessage {
   ObdPlanMessage({
-    required this.profileId,
-    required this.profileVersion,
+    required this.planId,
+    required this.planVersion,
     required this.formatVersion,
     required this.init,
     required this.resync,
@@ -589,9 +589,9 @@ class ObdPlanMessage {
     required this.limits,
   });
 
-  String profileId;
+  String planId;
 
-  int profileVersion;
+  int planVersion;
 
   int formatVersion;
 
@@ -607,8 +607,8 @@ class ObdPlanMessage {
 
   List<Object?> _toList() {
     return <Object?>[
-      profileId,
-      profileVersion,
+      planId,
+      planVersion,
       formatVersion,
       init,
       resync,
@@ -625,8 +625,8 @@ class ObdPlanMessage {
   static ObdPlanMessage decode(Object result) {
     result as List<Object?>;
     return ObdPlanMessage(
-      profileId: result[0]! as String,
-      profileVersion: result[1]! as int,
+      planId: result[0]! as String,
+      planVersion: result[1]! as int,
       formatVersion: result[2]! as int,
       init: (result[3]! as List<Object?>).cast<String>(),
       resync: (result[4]! as List<Object?>).cast<String>(),
@@ -645,8 +645,8 @@ class ObdPlanMessage {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(profileId, other.profileId) &&
-        _deepEquals(profileVersion, other.profileVersion) &&
+    return _deepEquals(planId, other.planId) &&
+        _deepEquals(planVersion, other.planVersion) &&
         _deepEquals(formatVersion, other.formatVersion) &&
         _deepEquals(init, other.init) &&
         _deepEquals(resync, other.resync) &&
