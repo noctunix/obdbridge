@@ -1,3 +1,38 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-  package="de.noctunix.obdbridge">
+    xmlns:tools="http://schemas.android.com/tools"
+    package="de.noctunix.obdbridge">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- The targetSdk 34+ declaration a `connectedDevice` foreground service needs
+         alongside FOREGROUND_SERVICE itself. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Scanning for and connecting to the adapter (CxBleClient.kt). API 31+ needs the
+         two dedicated Bluetooth runtime permissions below; `neverForLocation` is correct
+         because this library never derives position from a BLE scan result. Pre-31 BLE
+         scanning instead requires a location permission, which the host app declares if
+         it wants location at all — this library does not declare one of its own. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <!-- Bluetooth is optional: both declared `required="false"` so the merged manifest's
+         BLUETOOTH/BLUETOOTH_ADMIN permissions above cannot be read as implying the host
+         app needs Bluetooth hardware to install or run at all. -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
+    <application>
+        <!-- The buffered recording's foreground service. Not exported — only
+             ObdApi.startRecording ever starts it. -->
+        <service
+            android:name="de.noctunix.obdbridge.CxRecordingService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+    </application>
 </manifest>
