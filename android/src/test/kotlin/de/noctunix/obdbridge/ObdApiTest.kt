@@ -140,6 +140,7 @@ private fun limits(maxReadsPerSecond: Long = 10_000) = ObdLimitsMessage(
     vehicleReadDeadlineMs = 2000,
     maxReadsPerSecond = maxReadsPerSecond,
     maxConsecutiveTimeouts = 1_000_000,
+    onConsecutiveFailures = ObdConsecutiveFailuresPolicyMessage.END_RECORDING,
     idleVehicleStopAfterMs = Long.MAX_VALUE,
     reconnectBackoffMinMs = 5000,
     reconnectBackoffMaxMs = 60000,

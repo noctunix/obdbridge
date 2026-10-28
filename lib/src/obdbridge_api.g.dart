@@ -145,6 +145,19 @@ enum ObdLinkFailureMessage {
   platformError,
 }
 
+/// What a recording does once [ObdLimitsMessage.maxConsecutiveTimeouts] is reached.
+enum ObdConsecutiveFailuresPolicyMessage {
+  /// Drops the connection and runs the existing reconnect path — the original, pre-0.2.1
+  /// behavior, kept as the default so a caller that never sets this field keeps getting it.
+  endRecording,
+
+  /// Lets the command session's own resync sequence (already triggered by the failures that
+  /// ran the counter up) keep running and the poller keep polling, instead of ending the
+  /// recording outright. If the link actually drops during that resync, the existing
+  /// reconnect path still takes over — this only changes what happens while it has not.
+  resyncAndContinue,
+}
+
 /// Outcome of one step's most recently attempted execution.
 /// [notYetPolled] is this package's own addition to the transport-status
 /// vocabulary a buffered recording's own stored outcome otherwise carries: a
@@ -480,6 +493,8 @@ class ObdLimitsMessage {
     required this.vehicleReadDeadlineMs,
     required this.maxReadsPerSecond,
     required this.maxConsecutiveTimeouts,
+    this.onConsecutiveFailures =
+        ObdConsecutiveFailuresPolicyMessage.endRecording,
     required this.idleVehicleStopAfterMs,
     required this.reconnectBackoffMinMs,
     required this.reconnectBackoffMaxMs,
@@ -496,10 +511,15 @@ class ObdLimitsMessage {
 
   int maxReadsPerSecond;
 
-  /// Consecutive failed vehicle-read attempts (any non-`ok` transport status) before the
-  /// connection is dropped and the gap recorded — the first failure already triggers the
-  /// command session's own resync, this is the budget for a *second* one right after.
+  /// Consecutive failed vehicle-read attempts (any non-`ok` transport status) before
+  /// [onConsecutiveFailures] applies — the first failure already triggers the command
+  /// session's own resync, this is the budget for a *second* one right after.
   int maxConsecutiveTimeouts;
+
+  /// What happens once [maxConsecutiveTimeouts] is reached. Default
+  /// [ObdConsecutiveFailuresPolicyMessage.endRecording] for compatibility with a caller built
+  /// against an older version of this field's absence.
+  ObdConsecutiveFailuresPolicyMessage onConsecutiveFailures;
 
   /// Stop polling and report the recording ended once every vehicle-read signal has answered
   /// `NO DATA` for this long — a parked vehicle whose bus has gone to sleep, not a transport
@@ -526,6 +546,7 @@ class ObdLimitsMessage {
       vehicleReadDeadlineMs,
       maxReadsPerSecond,
       maxConsecutiveTimeouts,
+      onConsecutiveFailures,
       idleVehicleStopAfterMs,
       reconnectBackoffMinMs,
       reconnectBackoffMaxMs,
@@ -547,12 +568,13 @@ class ObdLimitsMessage {
       vehicleReadDeadlineMs: result[2]! as int,
       maxReadsPerSecond: result[3]! as int,
       maxConsecutiveTimeouts: result[4]! as int,
-      idleVehicleStopAfterMs: result[5]! as int,
-      reconnectBackoffMinMs: result[6]! as int,
-      reconnectBackoffMaxMs: result[7]! as int,
-      maxReconnectAttemptsPerGap: result[8]! as int,
-      maxRecordingMs: result[9]! as int,
-      maxBufferBytes: result[10]! as int,
+      onConsecutiveFailures: result[5]! as ObdConsecutiveFailuresPolicyMessage,
+      idleVehicleStopAfterMs: result[6]! as int,
+      reconnectBackoffMinMs: result[7]! as int,
+      reconnectBackoffMaxMs: result[8]! as int,
+      maxReconnectAttemptsPerGap: result[9]! as int,
+      maxRecordingMs: result[10]! as int,
+      maxBufferBytes: result[11]! as int,
     );
   }
 
@@ -570,6 +592,7 @@ class ObdLimitsMessage {
         _deepEquals(vehicleReadDeadlineMs, other.vehicleReadDeadlineMs) &&
         _deepEquals(maxReadsPerSecond, other.maxReadsPerSecond) &&
         _deepEquals(maxConsecutiveTimeouts, other.maxConsecutiveTimeouts) &&
+        _deepEquals(onConsecutiveFailures, other.onConsecutiveFailures) &&
         _deepEquals(idleVehicleStopAfterMs, other.idleVehicleStopAfterMs) &&
         _deepEquals(reconnectBackoffMinMs, other.reconnectBackoffMinMs) &&
         _deepEquals(reconnectBackoffMaxMs, other.reconnectBackoffMaxMs) &&
@@ -1208,56 +1231,59 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is ObdLinkFailureMessage) {
       buffer.putUint8(132);
       writeValue(buffer, value.index);
-    } else if (value is ObdTransportStatusMessage) {
+    } else if (value is ObdConsecutiveFailuresPolicyMessage) {
       buffer.putUint8(133);
       writeValue(buffer, value.index);
-    } else if (value is ObdRecordingStateValueMessage) {
+    } else if (value is ObdTransportStatusMessage) {
       buffer.putUint8(134);
       writeValue(buffer, value.index);
-    } else if (value is ObdOneShotEnqueueResultMessage) {
+    } else if (value is ObdRecordingStateValueMessage) {
       buffer.putUint8(135);
       writeValue(buffer, value.index);
-    } else if (value is ObdCapabilitiesMessage) {
+    } else if (value is ObdOneShotEnqueueResultMessage) {
       buffer.putUint8(136);
-      writeValue(buffer, value.encode());
-    } else if (value is ObdAdapterMessage) {
+      writeValue(buffer, value.index);
+    } else if (value is ObdCapabilitiesMessage) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    } else if (value is ObdLinkStateMessage) {
+    } else if (value is ObdAdapterMessage) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    } else if (value is ObdModuleMessage) {
+    } else if (value is ObdLinkStateMessage) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    } else if (value is ObdStepMessage) {
+    } else if (value is ObdModuleMessage) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    } else if (value is ObdLimitsMessage) {
+    } else if (value is ObdStepMessage) {
       buffer.putUint8(141);
       writeValue(buffer, value.encode());
-    } else if (value is ObdPlanMessage) {
+    } else if (value is ObdLimitsMessage) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    } else if (value is ObdSignalExchangeMessage) {
+    } else if (value is ObdPlanMessage) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    } else if (value is ObdLiveStateMessage) {
+    } else if (value is ObdSignalExchangeMessage) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingNotificationMessage) {
+    } else if (value is ObdLiveStateMessage) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    } else if (value is ObdBridgeConfigMessage) {
+    } else if (value is ObdRecordingNotificationMessage) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingOptionsMessage) {
+    } else if (value is ObdBridgeConfigMessage) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    } else if (value is ObdStartRecordingRequest) {
+    } else if (value is ObdRecordingOptionsMessage) {
       buffer.putUint8(148);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingStateMessage) {
+    } else if (value is ObdStartRecordingRequest) {
       buffer.putUint8(149);
+      writeValue(buffer, value.encode());
+    } else if (value is ObdRecordingStateMessage) {
+      buffer.putUint8(150);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1283,44 +1309,49 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : ObdLinkFailureMessage.values[value];
       case 133:
         final value = readValue(buffer) as int?;
-        return value == null ? null : ObdTransportStatusMessage.values[value];
-      case 134:
-        final value = readValue(buffer) as int?;
         return value == null
             ? null
-            : ObdRecordingStateValueMessage.values[value];
+            : ObdConsecutiveFailuresPolicyMessage.values[value];
+      case 134:
+        final value = readValue(buffer) as int?;
+        return value == null ? null : ObdTransportStatusMessage.values[value];
       case 135:
         final value = readValue(buffer) as int?;
         return value == null
             ? null
-            : ObdOneShotEnqueueResultMessage.values[value];
+            : ObdRecordingStateValueMessage.values[value];
       case 136:
-        return ObdCapabilitiesMessage.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null
+            ? null
+            : ObdOneShotEnqueueResultMessage.values[value];
       case 137:
-        return ObdAdapterMessage.decode(readValue(buffer)!);
+        return ObdCapabilitiesMessage.decode(readValue(buffer)!);
       case 138:
-        return ObdLinkStateMessage.decode(readValue(buffer)!);
+        return ObdAdapterMessage.decode(readValue(buffer)!);
       case 139:
-        return ObdModuleMessage.decode(readValue(buffer)!);
+        return ObdLinkStateMessage.decode(readValue(buffer)!);
       case 140:
-        return ObdStepMessage.decode(readValue(buffer)!);
+        return ObdModuleMessage.decode(readValue(buffer)!);
       case 141:
-        return ObdLimitsMessage.decode(readValue(buffer)!);
+        return ObdStepMessage.decode(readValue(buffer)!);
       case 142:
-        return ObdPlanMessage.decode(readValue(buffer)!);
+        return ObdLimitsMessage.decode(readValue(buffer)!);
       case 143:
-        return ObdSignalExchangeMessage.decode(readValue(buffer)!);
+        return ObdPlanMessage.decode(readValue(buffer)!);
       case 144:
-        return ObdLiveStateMessage.decode(readValue(buffer)!);
+        return ObdSignalExchangeMessage.decode(readValue(buffer)!);
       case 145:
-        return ObdRecordingNotificationMessage.decode(readValue(buffer)!);
+        return ObdLiveStateMessage.decode(readValue(buffer)!);
       case 146:
-        return ObdBridgeConfigMessage.decode(readValue(buffer)!);
+        return ObdRecordingNotificationMessage.decode(readValue(buffer)!);
       case 147:
-        return ObdRecordingOptionsMessage.decode(readValue(buffer)!);
+        return ObdBridgeConfigMessage.decode(readValue(buffer)!);
       case 148:
-        return ObdStartRecordingRequest.decode(readValue(buffer)!);
+        return ObdRecordingOptionsMessage.decode(readValue(buffer)!);
       case 149:
+        return ObdStartRecordingRequest.decode(readValue(buffer)!);
+      case 150:
         return ObdRecordingStateMessage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);

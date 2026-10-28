@@ -259,6 +259,28 @@ enum class ObdLinkFailureMessage(val raw: Int) {
   }
 }
 
+/** What a recording does once [ObdLimitsMessage.maxConsecutiveTimeouts] is reached. */
+enum class ObdConsecutiveFailuresPolicyMessage(val raw: Int) {
+  /**
+   * Drops the connection and runs the existing reconnect path — the original, pre-0.2.1
+   * behavior, kept as the default so a caller that never sets this field keeps getting it.
+   */
+  END_RECORDING(0),
+  /**
+   * Lets the command session's own resync sequence (already triggered by the failures that
+   * ran the counter up) keep running and the poller keep polling, instead of ending the
+   * recording outright. If the link actually drops during that resync, the existing
+   * reconnect path still takes over — this only changes what happens while it has not.
+   */
+  RESYNC_AND_CONTINUE(1);
+
+  companion object {
+    fun ofRaw(raw: Int): ObdConsecutiveFailuresPolicyMessage? {
+      return values().firstOrNull { it.raw == raw }
+    }
+  }
+}
+
 /**
  * Outcome of one step's most recently attempted execution.
  * [notYetPolled] is this package's own addition to the transport-status
@@ -588,11 +610,17 @@ data class ObdLimitsMessage (
   val vehicleReadDeadlineMs: Long,
   val maxReadsPerSecond: Long,
   /**
-   * Consecutive failed vehicle-read attempts (any non-`ok` transport status) before the
-   * connection is dropped and the gap recorded — the first failure already triggers the
-   * command session's own resync, this is the budget for a *second* one right after.
+   * Consecutive failed vehicle-read attempts (any non-`ok` transport status) before
+   * [onConsecutiveFailures] applies — the first failure already triggers the command
+   * session's own resync, this is the budget for a *second* one right after.
    */
   val maxConsecutiveTimeouts: Long,
+  /**
+   * What happens once [maxConsecutiveTimeouts] is reached. Default
+   * [ObdConsecutiveFailuresPolicyMessage.endRecording] for compatibility with a caller built
+   * against an older version of this field's absence.
+   */
+  val onConsecutiveFailures: ObdConsecutiveFailuresPolicyMessage,
   /**
    * Stop polling and report the recording ended once every vehicle-read signal has answered
    * `NO DATA` for this long — a parked vehicle whose bus has gone to sleep, not a transport
@@ -618,13 +646,14 @@ data class ObdLimitsMessage (
       val vehicleReadDeadlineMs = pigeonVar_list[2] as Long
       val maxReadsPerSecond = pigeonVar_list[3] as Long
       val maxConsecutiveTimeouts = pigeonVar_list[4] as Long
-      val idleVehicleStopAfterMs = pigeonVar_list[5] as Long
-      val reconnectBackoffMinMs = pigeonVar_list[6] as Long
-      val reconnectBackoffMaxMs = pigeonVar_list[7] as Long
-      val maxReconnectAttemptsPerGap = pigeonVar_list[8] as Long
-      val maxRecordingMs = pigeonVar_list[9] as Long
-      val maxBufferBytes = pigeonVar_list[10] as Long
-      return ObdLimitsMessage(maxResponseBytes, adapterStepDeadlineMs, vehicleReadDeadlineMs, maxReadsPerSecond, maxConsecutiveTimeouts, idleVehicleStopAfterMs, reconnectBackoffMinMs, reconnectBackoffMaxMs, maxReconnectAttemptsPerGap, maxRecordingMs, maxBufferBytes)
+      val onConsecutiveFailures = pigeonVar_list[5] as ObdConsecutiveFailuresPolicyMessage
+      val idleVehicleStopAfterMs = pigeonVar_list[6] as Long
+      val reconnectBackoffMinMs = pigeonVar_list[7] as Long
+      val reconnectBackoffMaxMs = pigeonVar_list[8] as Long
+      val maxReconnectAttemptsPerGap = pigeonVar_list[9] as Long
+      val maxRecordingMs = pigeonVar_list[10] as Long
+      val maxBufferBytes = pigeonVar_list[11] as Long
+      return ObdLimitsMessage(maxResponseBytes, adapterStepDeadlineMs, vehicleReadDeadlineMs, maxReadsPerSecond, maxConsecutiveTimeouts, onConsecutiveFailures, idleVehicleStopAfterMs, reconnectBackoffMinMs, reconnectBackoffMaxMs, maxReconnectAttemptsPerGap, maxRecordingMs, maxBufferBytes)
     }
   }
   fun toList(): List<Any?> {
@@ -634,6 +663,7 @@ data class ObdLimitsMessage (
       vehicleReadDeadlineMs,
       maxReadsPerSecond,
       maxConsecutiveTimeouts,
+      onConsecutiveFailures,
       idleVehicleStopAfterMs,
       reconnectBackoffMinMs,
       reconnectBackoffMaxMs,
@@ -650,7 +680,7 @@ data class ObdLimitsMessage (
       return true
     }
     val other = other as ObdLimitsMessage
-    return ObdApiPigeonUtils.deepEquals(this.maxResponseBytes, other.maxResponseBytes) && ObdApiPigeonUtils.deepEquals(this.adapterStepDeadlineMs, other.adapterStepDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.vehicleReadDeadlineMs, other.vehicleReadDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.maxReadsPerSecond, other.maxReadsPerSecond) && ObdApiPigeonUtils.deepEquals(this.maxConsecutiveTimeouts, other.maxConsecutiveTimeouts) && ObdApiPigeonUtils.deepEquals(this.idleVehicleStopAfterMs, other.idleVehicleStopAfterMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMinMs, other.reconnectBackoffMinMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMaxMs, other.reconnectBackoffMaxMs) && ObdApiPigeonUtils.deepEquals(this.maxReconnectAttemptsPerGap, other.maxReconnectAttemptsPerGap) && ObdApiPigeonUtils.deepEquals(this.maxRecordingMs, other.maxRecordingMs) && ObdApiPigeonUtils.deepEquals(this.maxBufferBytes, other.maxBufferBytes)
+    return ObdApiPigeonUtils.deepEquals(this.maxResponseBytes, other.maxResponseBytes) && ObdApiPigeonUtils.deepEquals(this.adapterStepDeadlineMs, other.adapterStepDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.vehicleReadDeadlineMs, other.vehicleReadDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.maxReadsPerSecond, other.maxReadsPerSecond) && ObdApiPigeonUtils.deepEquals(this.maxConsecutiveTimeouts, other.maxConsecutiveTimeouts) && ObdApiPigeonUtils.deepEquals(this.onConsecutiveFailures, other.onConsecutiveFailures) && ObdApiPigeonUtils.deepEquals(this.idleVehicleStopAfterMs, other.idleVehicleStopAfterMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMinMs, other.reconnectBackoffMinMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMaxMs, other.reconnectBackoffMaxMs) && ObdApiPigeonUtils.deepEquals(this.maxReconnectAttemptsPerGap, other.maxReconnectAttemptsPerGap) && ObdApiPigeonUtils.deepEquals(this.maxRecordingMs, other.maxRecordingMs) && ObdApiPigeonUtils.deepEquals(this.maxBufferBytes, other.maxBufferBytes)
   }
 
   override fun hashCode(): Int {
@@ -660,6 +690,7 @@ data class ObdLimitsMessage (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.vehicleReadDeadlineMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.maxReadsPerSecond)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.maxConsecutiveTimeouts)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.onConsecutiveFailures)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.idleVehicleStopAfterMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.reconnectBackoffMinMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.reconnectBackoffMaxMs)
@@ -1226,85 +1257,90 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
       }
       133.toByte() -> {
         return (readValue(buffer) as Long?)?.let {
-          ObdTransportStatusMessage.ofRaw(it.toInt())
+          ObdConsecutiveFailuresPolicyMessage.ofRaw(it.toInt())
         }
       }
       134.toByte() -> {
         return (readValue(buffer) as Long?)?.let {
-          ObdRecordingStateValueMessage.ofRaw(it.toInt())
+          ObdTransportStatusMessage.ofRaw(it.toInt())
         }
       }
       135.toByte() -> {
         return (readValue(buffer) as Long?)?.let {
-          ObdOneShotEnqueueResultMessage.ofRaw(it.toInt())
+          ObdRecordingStateValueMessage.ofRaw(it.toInt())
         }
       }
       136.toByte() -> {
-        return (readValue(buffer) as? List<Any?>)?.let {
-          ObdCapabilitiesMessage.fromList(it)
+        return (readValue(buffer) as Long?)?.let {
+          ObdOneShotEnqueueResultMessage.ofRaw(it.toInt())
         }
       }
       137.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdAdapterMessage.fromList(it)
+          ObdCapabilitiesMessage.fromList(it)
         }
       }
       138.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdLinkStateMessage.fromList(it)
+          ObdAdapterMessage.fromList(it)
         }
       }
       139.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdModuleMessage.fromList(it)
+          ObdLinkStateMessage.fromList(it)
         }
       }
       140.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdStepMessage.fromList(it)
+          ObdModuleMessage.fromList(it)
         }
       }
       141.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdLimitsMessage.fromList(it)
+          ObdStepMessage.fromList(it)
         }
       }
       142.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdPlanMessage.fromList(it)
+          ObdLimitsMessage.fromList(it)
         }
       }
       143.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdSignalExchangeMessage.fromList(it)
+          ObdPlanMessage.fromList(it)
         }
       }
       144.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdLiveStateMessage.fromList(it)
+          ObdSignalExchangeMessage.fromList(it)
         }
       }
       145.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdRecordingNotificationMessage.fromList(it)
+          ObdLiveStateMessage.fromList(it)
         }
       }
       146.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdBridgeConfigMessage.fromList(it)
+          ObdRecordingNotificationMessage.fromList(it)
         }
       }
       147.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdRecordingOptionsMessage.fromList(it)
+          ObdBridgeConfigMessage.fromList(it)
         }
       }
       148.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdStartRecordingRequest.fromList(it)
+          ObdRecordingOptionsMessage.fromList(it)
         }
       }
       149.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          ObdStartRecordingRequest.fromList(it)
+        }
+      }
+      150.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
           ObdRecordingStateMessage.fromList(it)
         }
@@ -1330,72 +1366,76 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
         stream.write(132)
         writeValue(stream, value.raw.toLong())
       }
-      is ObdTransportStatusMessage -> {
+      is ObdConsecutiveFailuresPolicyMessage -> {
         stream.write(133)
         writeValue(stream, value.raw.toLong())
       }
-      is ObdRecordingStateValueMessage -> {
+      is ObdTransportStatusMessage -> {
         stream.write(134)
         writeValue(stream, value.raw.toLong())
       }
-      is ObdOneShotEnqueueResultMessage -> {
+      is ObdRecordingStateValueMessage -> {
         stream.write(135)
         writeValue(stream, value.raw.toLong())
       }
-      is ObdCapabilitiesMessage -> {
+      is ObdOneShotEnqueueResultMessage -> {
         stream.write(136)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is ObdAdapterMessage -> {
+      is ObdCapabilitiesMessage -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is ObdLinkStateMessage -> {
+      is ObdAdapterMessage -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is ObdModuleMessage -> {
+      is ObdLinkStateMessage -> {
         stream.write(139)
         writeValue(stream, value.toList())
       }
-      is ObdStepMessage -> {
+      is ObdModuleMessage -> {
         stream.write(140)
         writeValue(stream, value.toList())
       }
-      is ObdLimitsMessage -> {
+      is ObdStepMessage -> {
         stream.write(141)
         writeValue(stream, value.toList())
       }
-      is ObdPlanMessage -> {
+      is ObdLimitsMessage -> {
         stream.write(142)
         writeValue(stream, value.toList())
       }
-      is ObdSignalExchangeMessage -> {
+      is ObdPlanMessage -> {
         stream.write(143)
         writeValue(stream, value.toList())
       }
-      is ObdLiveStateMessage -> {
+      is ObdSignalExchangeMessage -> {
         stream.write(144)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingNotificationMessage -> {
+      is ObdLiveStateMessage -> {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ObdBridgeConfigMessage -> {
+      is ObdRecordingNotificationMessage -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingOptionsMessage -> {
+      is ObdBridgeConfigMessage -> {
         stream.write(147)
         writeValue(stream, value.toList())
       }
-      is ObdStartRecordingRequest -> {
+      is ObdRecordingOptionsMessage -> {
         stream.write(148)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingStateMessage -> {
+      is ObdStartRecordingRequest -> {
         stream.write(149)
+        writeValue(stream, value.toList())
+      }
+      is ObdRecordingStateMessage -> {
+        stream.write(150)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)

@@ -134,6 +134,19 @@ class ObdStepMessage {
   int intervalMs;
 }
 
+/// What a recording does once [ObdLimitsMessage.maxConsecutiveTimeouts] is reached.
+enum ObdConsecutiveFailuresPolicyMessage {
+  /// Drops the connection and runs the existing reconnect path — the original, pre-0.2.1
+  /// behavior, kept as the default so a caller that never sets this field keeps getting it.
+  endRecording,
+
+  /// Lets the command session's own resync sequence (already triggered by the failures that
+  /// ran the counter up) keep running and the poller keep polling, instead of ending the
+  /// recording outright. If the link actually drops during that resync, the existing
+  /// reconnect path still takes over — this only changes what happens while it has not.
+  resyncAndContinue,
+}
+
 class ObdLimitsMessage {
   ObdLimitsMessage({
     required this.maxResponseBytes,
@@ -141,6 +154,8 @@ class ObdLimitsMessage {
     required this.vehicleReadDeadlineMs,
     required this.maxReadsPerSecond,
     required this.maxConsecutiveTimeouts,
+    this.onConsecutiveFailures =
+        ObdConsecutiveFailuresPolicyMessage.endRecording,
     required this.idleVehicleStopAfterMs,
     required this.reconnectBackoffMinMs,
     required this.reconnectBackoffMaxMs,
@@ -154,10 +169,15 @@ class ObdLimitsMessage {
   int vehicleReadDeadlineMs;
   int maxReadsPerSecond;
 
-  /// Consecutive failed vehicle-read attempts (any non-`ok` transport status) before the
-  /// connection is dropped and the gap recorded — the first failure already triggers the
-  /// command session's own resync, this is the budget for a *second* one right after.
+  /// Consecutive failed vehicle-read attempts (any non-`ok` transport status) before
+  /// [onConsecutiveFailures] applies — the first failure already triggers the command
+  /// session's own resync, this is the budget for a *second* one right after.
   int maxConsecutiveTimeouts;
+
+  /// What happens once [maxConsecutiveTimeouts] is reached. Default
+  /// [ObdConsecutiveFailuresPolicyMessage.endRecording] for compatibility with a caller built
+  /// against an older version of this field's absence.
+  ObdConsecutiveFailuresPolicyMessage onConsecutiveFailures;
 
   /// Stop polling and report the recording ended once every vehicle-read signal has answered
   /// `NO DATA` for this long — a parked vehicle whose bus has gone to sleep, not a transport
