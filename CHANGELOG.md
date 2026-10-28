@@ -1,3 +1,16 @@
+## 0.2.1
+
+- `ObdLimitsMessage.onConsecutiveFailures`: set to `resyncAndContinue` to let
+  a recording keep polling once `maxConsecutiveTimeouts` is reached instead
+  of always ending it. The command session's own resync (already triggered
+  by the underlying failures) keeps running, the gap is still logged with a
+  reason, and a genuine link drop during it still goes through the existing
+  reconnect path. Default `endRecording` keeps the previous behavior.
+- A one-shot step accepted by `enqueueOneShot` can no longer vanish without a
+  result: a step still queued when the poller stops (user stop, recording
+  end, or any other reason) is now reported as transport status `cancelled`
+  with no raw data, instead of being dropped silently.
+
 ## 0.2.0
 
 - `ObdBridge.enqueueOneShot(modules, steps)`: appends plan-shaped, read-once

@@ -115,11 +115,14 @@ beyond that rejects the whole batch with
 `ObdOneShotEnqueueResultMessage.queueFull` — queuing none of it, never a
 silent drop. The queue is cleared when the recording ends, and its current
 depth is reported as `ObdRecordingStateMessage.oneShotQueueDepth` so a
-caller can pace further enqueueing. Each result is written to the
-recording's buffer like any other exchange (with an added `oneShot: true`
-field) and also delivered through `ObdEventsApi.onOneShotResult` —
-display-only, like every other event this package pushes; a result is
-never only available that way.
+caller can pace further enqueueing. Every accepted step gets exactly one
+result either way: an executed result written to the recording's buffer
+like any other exchange (with an added `oneShot: true` field) and also
+delivered through `ObdEventsApi.onOneShotResult`, or, if it is still
+queued when the recording stops for any reason, transport status
+`cancelled` with no raw data — never silence.
+`ObdEventsApi.onOneShotResult` is display-only, like every other event
+this package pushes; a result is never only available that way.
 
 ```dart
 final result = await bridge.enqueueOneShot(
@@ -158,7 +161,7 @@ dependencies:
   obdbridge:
     git:
       url: https://github.com/noctunix/obdbridge.git
-      ref: v0.2.0
+      ref: v0.2.1
 ```
 
 For local development against a checked-out copy, add a gitignored

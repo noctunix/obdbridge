@@ -12,6 +12,7 @@ export 'src/obdbridge_api.g.dart'
         ObdBackgroundRecordingCapabilityMessage,
         ObdBridgeConfigMessage,
         ObdCapabilitiesMessage,
+        ObdConsecutiveFailuresPolicyMessage,
         ObdEventsApi,
         ObdLimitsMessage,
         ObdLinkFailureMessage,
@@ -34,4 +35,4 @@ export 'src/obdbridge_api.g.dart'
 /// Current obdbridge package version.
 ///
 /// Kept in sync with the `version:` field in `pubspec.yaml`.
-const String obdbridgeVersion = '0.2.0';
+const String obdbridgeVersion = '0.2.1';
