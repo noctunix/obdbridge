@@ -98,6 +98,44 @@ Each `ObdStartRecordingRequest` also carries an `ObdRecordingOptionsMessage`:
 
 Android only; there is no iOS implementation yet.
 
+## One-shot queries during a recording
+
+`ObdBridge.enqueueOneShot(modules, steps)` appends plan-shaped, read-once
+work to the recording that is currently running. Each step in `steps` is
+read exactly once — its `intervalMs` is ignored — using the given or
+already-planned module's setup from `modules`, interleaved into the
+poller's idle time between due recurring steps so the recording's own
+steps keep their timing. Every command `modules`' setup and `steps` carry
+is checked against the caller's `CommandPolicy` and `HardGuard` first,
+exactly like a plan's own commands; a rejected command throws
+`ObdBridgeCommandRejectedException` without calling native at all.
+
+Native keeps these steps in a bounded queue (4096 by default); enqueueing
+beyond that rejects the whole batch with
+`ObdOneShotEnqueueResultMessage.queueFull` — queuing none of it, never a
+silent drop. The queue is cleared when the recording ends, and its current
+depth is reported as `ObdRecordingStateMessage.oneShotQueueDepth` so a
+caller can pace further enqueueing. Each result is written to the
+recording's buffer like any other exchange (with an added `oneShot: true`
+field) and also delivered through `ObdEventsApi.onOneShotResult` —
+display-only, like every other event this package pushes; a result is
+never only available that way.
+
+```dart
+final result = await bridge.enqueueOneShot(
+  [], // the module this step addresses is already set up by the running plan
+  [
+    ObdStepMessage(
+      signalId: 'oneShotBatteryTemp',
+      moduleId: 'ecu1',
+      command: '221105',
+      responseHeader: '7E8',
+      intervalMs: 0, // ignored for a one-shot step
+    ),
+  ],
+);
+```
+
 ## Third-party licences
 
 The Nordic Android BLE Library (`no.nordicsemi.android:ble`) is
@@ -120,7 +158,7 @@ dependencies:
   obdbridge:
     git:
       url: https://github.com/noctunix/obdbridge.git
-      ref: v0.1.1
+      ref: v0.2.0
 ```
 
 For local development against a checked-out copy, add a gitignored

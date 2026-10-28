@@ -19,6 +19,7 @@ export 'src/obdbridge_api.g.dart'
         ObdLinkStateValueMessage,
         ObdLiveStateMessage,
         ObdModuleMessage,
+        ObdOneShotEnqueueResultMessage,
         ObdPermissionStatusMessage,
         ObdPlanMessage,
         ObdRecordingNotificationMessage,
@@ -33,4 +34,4 @@ export 'src/obdbridge_api.g.dart'
 /// Current obdbridge package version.
 ///
 /// Kept in sync with the `version:` field in `pubspec.yaml`.
-const String obdbridgeVersion = '0.1.1';
+const String obdbridgeVersion = '0.2.0';

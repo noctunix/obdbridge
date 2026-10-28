@@ -1,3 +1,18 @@
+## 0.2.0
+
+- `ObdBridge.enqueueOneShot(modules, steps)`: appends plan-shaped, read-once
+  work to the recording currently running. Each step is read exactly once,
+  using the given or already-planned module's setup, interleaved into the
+  poller's idle time between due recurring steps so the recording's own
+  steps keep their timing. Checked against the caller's policy and
+  `HardGuard` first, exactly like a plan's own commands. Native keeps a
+  bounded queue (4096 by default); a batch that would not fit is rejected
+  whole, never partially queued or silently dropped. The queue is cleared
+  when the recording ends; its depth is reported as
+  `ObdRecordingStateMessage.oneShotQueueDepth`. Each result is written to
+  the recording's buffer with an added `oneShot: true` field and also
+  delivered through `ObdEventsApi.onOneShotResult`.
+
 ## 0.1.1
 
 - Security fix: `HardGuard` no longer normalizes a command before checking it

@@ -1,6 +1,6 @@
 name: obdbridge
 description: "Read-only OBD/UDS over BLE for Flutter"
-version: 0.1.1
+version: 0.2.0
 homepage:
 
 environment:
