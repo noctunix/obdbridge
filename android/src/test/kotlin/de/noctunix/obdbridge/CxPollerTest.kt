@@ -85,6 +85,7 @@ class CxPollerTest {
         responses: MutableMap<String, String?>,
         clock: FakeClock,
         maxConsecutiveFailures: Int = Int.MAX_VALUE,
+        onConsecutiveFailuresPolicy: ObdConsecutiveFailuresPolicyMessage = ObdConsecutiveFailuresPolicyMessage.END_RECORDING,
         idleVehicleStopAfterMs: Long = Long.MAX_VALUE,
         onConsecutiveFailuresExceeded: (() -> Unit)? = null,
         onIdleVehicleDetected: (() -> Unit)? = null,
@@ -103,6 +104,7 @@ class CxPollerTest {
             maxReadsPerSecond = 10,
             monotonicBaseNs = 0L,
             maxConsecutiveFailures = maxConsecutiveFailures,
+            onConsecutiveFailuresPolicy = onConsecutiveFailuresPolicy,
             idleVehicleStopAfterMs = idleVehicleStopAfterMs,
             onConsecutiveFailuresExceeded = onConsecutiveFailuresExceeded,
             onIdleVehicleDetected = onIdleVehicleDetected,
@@ -211,6 +213,36 @@ class CxPollerTest {
 
         assertEquals("a success in between must reset the counter, not merely delay tripping it", 0, exceededCalls)
         assertTrue("the alternation must actually have run multiple attempts", attempt >= 6)
+    }
+
+    @Test
+    fun resyncAndContinueFiresTheCallbackWithoutStoppingThePoller() {
+        val clock = FakeClock()
+        // Every vehicle read times out; module setup always succeeds, so the counter climbs
+        // without end once CxCommandSession's own resync is never actually configured here —
+        // this test is only about the poller continuing to run past the threshold, the resync
+        // sequence itself is CxCommandSession's own concern (see CxPollerTest's other tests).
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to null)
+        var exceededCalls = 0
+        val poller = buildPoller(
+            responses,
+            clock,
+            maxConsecutiveFailures = 2,
+            onConsecutiveFailuresPolicy = ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE,
+            onConsecutiveFailuresExceeded = { exceededCalls++ },
+        )
+
+        poller.start(listOf(stepA))
+        drive(clock, maxSteps = 100, until = { exceededCalls > 0 })
+
+        assertTrue("the threshold must still fire the callback", exceededCalls > 0)
+        // A stopped poller rejects every further enqueueOneShot call outright (see
+        // `enqueueOneShot`'s own `stopped ||` check) — accepted here is this test's proof that
+        // resyncAndContinue never called `stop()` for hitting the budget.
+        assertEquals(
+            ObdOneShotEnqueueResultMessage.ACCEPTED,
+            poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),
+        )
     }
 
     @Test
@@ -338,6 +370,35 @@ class CxPollerTest {
     }
 
     @Test
+    fun aOneShotStepWhoseModuleSetupFailsStillReportsExactlyOneResult() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>(
+            "ATSP6" to "OK",
+            // moduleB's own setup command never answers — the one-shot step addressing it must
+            // not simply vanish just because the setup it needed never completed.
+            "ATSH720" to null,
+            "222AB8" to "622AB80005E3",
+        )
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = buildPoller(responses, clock, sink = { exchanges.add(it) })
+
+        poller.start(listOf(stepA))
+        assertEquals(1, exchanges.size)
+
+        val result = poller.enqueueOneShot(listOf(moduleB), listOf(oneShotStepB))
+        assertEquals(ObdOneShotEnqueueResultMessage.ACCEPTED, result)
+        drive(clock, maxSteps = 100, until = { exchanges.size >= 2 })
+
+        assertEquals(2, exchanges.size)
+        val failed = exchanges[1]
+        assertEquals("oneShotB", failed.signalId)
+        assertTrue(failed.oneShot)
+        assertEquals(ObdTransportStatusMessage.WRITE_FAILED, failed.transport)
+        assertEquals(null, failed.responseText)
+        assertEquals(0, poller.oneShotQueueDepth)
+    }
+
+    @Test
     fun enqueueOneShotRejectsTheWholeBatchOnceItWouldExceedCapacity() {
         val clock = FakeClock()
         // stepA's own cycle issues at t=0 and sets the global rate-limit floor to t=100 — the
@@ -361,7 +422,7 @@ class CxPollerTest {
     }
 
     @Test
-    fun stoppingThePollerClearsTheOneShotQueue() {
+    fun stoppingThePollerReportsEveryQueuedOneShotStepAsCancelledRatherThanDroppingIt() {
         val clock = FakeClock()
         // Same rate-limit window as above, so the queued one-shot below is still sitting
         // unexamined in the queue when `stop()` runs, not already dispatched.
@@ -378,10 +439,16 @@ class CxPollerTest {
         assertEquals(0, poller.oneShotQueueDepth)
         assertEquals(
             "a stopped poller must never run work left in the one-shot queue — the only " +
-                "exchange here is stepA's own synchronous first cycle, not the one-shot",
-            1,
+                "other exchange here is stepA's own synchronous first cycle",
+            2,
             exchanges.size,
         )
+        val cancelled = exchanges[1]
+        assertEquals("oneShotA", cancelled.signalId)
+        assertTrue(cancelled.oneShot)
+        assertEquals(ObdTransportStatusMessage.CANCELLED, cancelled.transport)
+        assertEquals(null, cancelled.responseText)
+        assertEquals(0, cancelled.rawBytes.size)
         assertEquals(
             ObdOneShotEnqueueResultMessage.QUEUE_FULL,
             poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),

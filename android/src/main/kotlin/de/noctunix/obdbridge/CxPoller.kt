@@ -66,6 +66,12 @@ class CxPoller(
      * the first failure already triggers [CxCommandSession]'s own resync; this is the budget for
      * a second one right after. [Int.MAX_VALUE] (the default) disables the check outright. */
     private val maxConsecutiveFailures: Int = Int.MAX_VALUE,
+    /** What happens once [maxConsecutiveFailures] is reached —
+     * [ObdConsecutiveFailuresPolicyMessage.endRecording] (the default) still stops this poller
+     * and fires [onConsecutiveFailuresExceeded] as before; [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue]
+     * instead fires it without stopping, so polling keeps running through whatever resync
+     * [CxCommandSession] already has in progress from the failures that ran the counter up. */
+    private val onConsecutiveFailuresPolicy: ObdConsecutiveFailuresPolicyMessage = ObdConsecutiveFailuresPolicyMessage.END_RECORDING,
     /** Stop and call [onIdleVehicleDetected] once every step has answered `NO DATA` for this
      * long — a parked vehicle whose bus went quiet, not a transport failure.
      * [Long.MAX_VALUE] (the default) disables the check. */
@@ -135,8 +141,11 @@ class CxPoller(
         scheduledTask?.cancel()
         scheduledTask = null
         // A stopped poller never runs anything queued here again — see CxRecordingService's own
-        // "queue cleared when the recording ends" requirement.
-        oneShotQueue.clear()
+        // "queue cleared when the recording ends" requirement. Every step still waiting here was
+        // already accepted by a prior enqueueOneShot call, so dropping it silently would break
+        // that call's "exactly one result event" contract just as much as never reporting it at
+        // all would.
+        cancelQueuedOneShots()
     }
 
     /** Appends [steps] to [oneShotQueue], merging [modules] into [oneShotModuleOverrides] first
@@ -442,16 +451,51 @@ class CxPoller(
         if (!stopped) scheduleNext()
     }
 
+    /** Reports every step still waiting in [oneShotQueue] as [ObdTransportStatusMessage.CANCELLED]
+     * (no raw data, [CxPollExchange.oneShot] `true`) and empties it — called from [stop], the one
+     * place that ever discards queued one-shot work outright, so a step [enqueueOneShot] already
+     * accepted never simply vanishes regardless of *why* this poller stopped (a caller-requested
+     * stop, the recording ending, an idle-vehicle or consecutive-failure callback that itself
+     * calls [stop]). */
+    private fun cancelQueuedOneShots() {
+        while (oneShotQueue.isNotEmpty()) {
+            val step = oneShotQueue.removeFirst()
+            val nowEpochMs = System.currentTimeMillis()
+            val monotonicElapsedNs = SystemClock.elapsedRealtimeNanos() - monotonicBaseNs
+            sink?.invoke(
+                CxPollExchange(
+                    signalId = step.signalId,
+                    transport = ObdTransportStatusMessage.CANCELLED,
+                    responseText = null,
+                    rawBytes = ByteArray(0),
+                    requestedAtEpochMs = nowEpochMs,
+                    receivedAtEpochMs = nowEpochMs,
+                    monotonicElapsedNs = monotonicElapsedNs,
+                    durationNs = 0L,
+                    oneShot = true,
+                ),
+            )
+        }
+    }
+
     /** Common bookkeeping for any non-OK poll attempt, module-setup failure included: counts
-     * towards [maxConsecutiveFailures] and, once over it, stops this poller and reports out —
-     * the connection itself is left for the caller to tear down or retry, this class only
-     * notices and stops polling it. */
+     * towards [maxConsecutiveFailures] and, once over it, reports out — the connection itself is
+     * left for the caller to tear down or retry, this class only notices. Under
+     * [ObdConsecutiveFailuresPolicyMessage.endRecording] that also stops this poller, same as
+     * before; under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue] the counter merely
+     * resets and polling keeps running — [CxCommandSession] already started its own resync off
+     * the first of these failures, long before this threshold was even reached. */
     private fun onFailure() {
         consecutiveFailures++
         allNoDataSinceMs = null
         if (consecutiveFailures >= maxConsecutiveFailures && !stopped) {
-            stop()
-            onConsecutiveFailuresExceeded?.invoke()
+            consecutiveFailures = 0
+            if (onConsecutiveFailuresPolicy == ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE) {
+                onConsecutiveFailuresExceeded?.invoke()
+            } else {
+                stop()
+                onConsecutiveFailuresExceeded?.invoke()
+            }
         }
     }
 

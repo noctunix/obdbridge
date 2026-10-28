@@ -263,6 +263,7 @@ class CxRecordingService : Service() {
             maxReadsPerSecond = plan.limits.maxReadsPerSecond.toInt(),
             monotonicBaseNs = timebase.second,
             maxConsecutiveFailures = plan.limits.maxConsecutiveTimeouts.toInt(),
+            onConsecutiveFailuresPolicy = plan.limits.onConsecutiveFailures,
             idleVehicleStopAfterMs = plan.limits.idleVehicleStopAfterMs,
             onConsecutiveFailuresExceeded = { onConsecutiveFailuresExceeded(obd) },
             onIdleVehicleDetected = { endRecordingInternal(CxRecordingPhase.STOPPED, "vehicle idle, no data on any signal") },
@@ -343,12 +344,21 @@ class CxRecordingService : Service() {
 
     /** The budget `ObdLimitsMessage.maxConsecutiveTimeouts` governs ran out — the connection is
      * no longer trustworthy even though [CxBleClient] may still consider it nominally connected.
-     * Starts recovery first, then drops the connection for real via
-     * [ObdApi.disconnectForRecording]: that disconnect also cascades into [onConnectionLost]
-     * through the same listener a genuine BLE drop would, which [beginOrContinueRecovery]'s own
-     * guard absorbs as a no-op rather than a second backoff chain. */
+     * Under [ObdConsecutiveFailuresPolicyMessage.endRecording] (the default), starts recovery
+     * first, then drops the connection for real via [ObdApi.disconnectForRecording]: that
+     * disconnect also cascades into [onConnectionLost] through the same listener a genuine BLE
+     * drop would, which [beginOrContinueRecovery]'s own guard absorbs as a no-op rather than a
+     * second backoff chain. Under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue], the
+     * poller itself never stopped for this (see [CxPoller.onFailure]) — this only logs the gap
+     * line the caller still needs to see the budget was hit, and otherwise does nothing: the
+     * resync [CxCommandSession] already started off the underlying failures is what recovers the
+     * link, and a real drop during it still reaches [onConnectionLost] on its own. */
     private fun onConsecutiveFailuresExceeded(obd: ObdApi) {
         if (sessionId == null) return
+        if (request?.plan?.limits?.onConsecutiveFailures == ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE) {
+            writer?.appendGap("consecutive vehicle-read failures exceeded the configured limit, resyncing")
+            return
+        }
         beginOrContinueRecovery(obd, "consecutive vehicle-read failures exceeded the configured limit")
         obd.disconnectForRecording()
     }
