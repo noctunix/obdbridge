@@ -298,6 +298,25 @@ enum class ObdRecordingStateValueMessage(val raw: Int) {
   }
 }
 
+/** Outcome of one [NativeObdApi.enqueueOneShot] call. */
+enum class ObdOneShotEnqueueResultMessage(val raw: Int) {
+  /** The whole batch was queued. */
+  ACCEPTED(0),
+  /**
+   * Queuing the whole batch would have exceeded the native-side bound; none
+   * of it was queued — never a partial enqueue.
+   */
+  QUEUE_FULL(1),
+  /** No recording is currently running to queue the batch against. */
+  NO_ACTIVE_RECORDING(2);
+
+  companion object {
+    fun ofRaw(raw: Int): ObdOneShotEnqueueResultMessage? {
+      return values().firstOrNull { it.raw == raw }
+    }
+  }
+}
+
 /**
  * Native platform capability report for the OBD transport.
  * Reported, never assumed — the UI and any later recording orchestration
@@ -1123,7 +1142,14 @@ data class ObdRecordingStateMessage (
    * ever recognizes an abandoned recording as `interrupted`, it never
    * resumes one.
    */
-  val resumedAfterRestart: Boolean
+  val resumedAfterRestart: Boolean,
+  /**
+   * Number of steps still waiting in [NativeObdApi.enqueueOneShot]'s queue
+   * for the currently running recording — `0` whenever none is running.
+   * Lets a caller pace further enqueueing instead of racing the native-side
+   * bound.
+   */
+  val oneShotQueueDepth: Long
 )
  {
   companion object {
@@ -1135,7 +1161,8 @@ data class ObdRecordingStateMessage (
       val gapCount = pigeonVar_list[4] as Long
       val writeError = pigeonVar_list[5] as String?
       val resumedAfterRestart = pigeonVar_list[6] as Boolean
-      return ObdRecordingStateMessage(sessionId, state, lastFlushedSequence, bufferBytes, gapCount, writeError, resumedAfterRestart)
+      val oneShotQueueDepth = pigeonVar_list[7] as Long
+      return ObdRecordingStateMessage(sessionId, state, lastFlushedSequence, bufferBytes, gapCount, writeError, resumedAfterRestart, oneShotQueueDepth)
     }
   }
   fun toList(): List<Any?> {
@@ -1147,6 +1174,7 @@ data class ObdRecordingStateMessage (
       gapCount,
       writeError,
       resumedAfterRestart,
+      oneShotQueueDepth,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -1157,7 +1185,7 @@ data class ObdRecordingStateMessage (
       return true
     }
     val other = other as ObdRecordingStateMessage
-    return ObdApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && ObdApiPigeonUtils.deepEquals(this.state, other.state) && ObdApiPigeonUtils.deepEquals(this.lastFlushedSequence, other.lastFlushedSequence) && ObdApiPigeonUtils.deepEquals(this.bufferBytes, other.bufferBytes) && ObdApiPigeonUtils.deepEquals(this.gapCount, other.gapCount) && ObdApiPigeonUtils.deepEquals(this.writeError, other.writeError) && ObdApiPigeonUtils.deepEquals(this.resumedAfterRestart, other.resumedAfterRestart)
+    return ObdApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && ObdApiPigeonUtils.deepEquals(this.state, other.state) && ObdApiPigeonUtils.deepEquals(this.lastFlushedSequence, other.lastFlushedSequence) && ObdApiPigeonUtils.deepEquals(this.bufferBytes, other.bufferBytes) && ObdApiPigeonUtils.deepEquals(this.gapCount, other.gapCount) && ObdApiPigeonUtils.deepEquals(this.writeError, other.writeError) && ObdApiPigeonUtils.deepEquals(this.resumedAfterRestart, other.resumedAfterRestart) && ObdApiPigeonUtils.deepEquals(this.oneShotQueueDepth, other.oneShotQueueDepth)
   }
 
   override fun hashCode(): Int {
@@ -1169,6 +1197,7 @@ data class ObdRecordingStateMessage (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.gapCount)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.writeError)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.resumedAfterRestart)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.oneShotQueueDepth)
     return result
   }
 }
@@ -1206,71 +1235,76 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
         }
       }
       135.toByte() -> {
-        return (readValue(buffer) as? List<Any?>)?.let {
-          ObdCapabilitiesMessage.fromList(it)
+        return (readValue(buffer) as Long?)?.let {
+          ObdOneShotEnqueueResultMessage.ofRaw(it.toInt())
         }
       }
       136.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdAdapterMessage.fromList(it)
+          ObdCapabilitiesMessage.fromList(it)
         }
       }
       137.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdLinkStateMessage.fromList(it)
+          ObdAdapterMessage.fromList(it)
         }
       }
       138.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdModuleMessage.fromList(it)
+          ObdLinkStateMessage.fromList(it)
         }
       }
       139.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdStepMessage.fromList(it)
+          ObdModuleMessage.fromList(it)
         }
       }
       140.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdLimitsMessage.fromList(it)
+          ObdStepMessage.fromList(it)
         }
       }
       141.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdPlanMessage.fromList(it)
+          ObdLimitsMessage.fromList(it)
         }
       }
       142.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdSignalExchangeMessage.fromList(it)
+          ObdPlanMessage.fromList(it)
         }
       }
       143.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdLiveStateMessage.fromList(it)
+          ObdSignalExchangeMessage.fromList(it)
         }
       }
       144.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdRecordingNotificationMessage.fromList(it)
+          ObdLiveStateMessage.fromList(it)
         }
       }
       145.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdBridgeConfigMessage.fromList(it)
+          ObdRecordingNotificationMessage.fromList(it)
         }
       }
       146.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdRecordingOptionsMessage.fromList(it)
+          ObdBridgeConfigMessage.fromList(it)
         }
       }
       147.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          ObdStartRecordingRequest.fromList(it)
+          ObdRecordingOptionsMessage.fromList(it)
         }
       }
       148.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          ObdStartRecordingRequest.fromList(it)
+        }
+      }
+      149.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
           ObdRecordingStateMessage.fromList(it)
         }
@@ -1304,60 +1338,64 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
         stream.write(134)
         writeValue(stream, value.raw.toLong())
       }
-      is ObdCapabilitiesMessage -> {
+      is ObdOneShotEnqueueResultMessage -> {
         stream.write(135)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is ObdAdapterMessage -> {
+      is ObdCapabilitiesMessage -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is ObdLinkStateMessage -> {
+      is ObdAdapterMessage -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is ObdModuleMessage -> {
+      is ObdLinkStateMessage -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is ObdStepMessage -> {
+      is ObdModuleMessage -> {
         stream.write(139)
         writeValue(stream, value.toList())
       }
-      is ObdLimitsMessage -> {
+      is ObdStepMessage -> {
         stream.write(140)
         writeValue(stream, value.toList())
       }
-      is ObdPlanMessage -> {
+      is ObdLimitsMessage -> {
         stream.write(141)
         writeValue(stream, value.toList())
       }
-      is ObdSignalExchangeMessage -> {
+      is ObdPlanMessage -> {
         stream.write(142)
         writeValue(stream, value.toList())
       }
-      is ObdLiveStateMessage -> {
+      is ObdSignalExchangeMessage -> {
         stream.write(143)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingNotificationMessage -> {
+      is ObdLiveStateMessage -> {
         stream.write(144)
         writeValue(stream, value.toList())
       }
-      is ObdBridgeConfigMessage -> {
+      is ObdRecordingNotificationMessage -> {
         stream.write(145)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingOptionsMessage -> {
+      is ObdBridgeConfigMessage -> {
         stream.write(146)
         writeValue(stream, value.toList())
       }
-      is ObdStartRecordingRequest -> {
+      is ObdRecordingOptionsMessage -> {
         stream.write(147)
         writeValue(stream, value.toList())
       }
-      is ObdRecordingStateMessage -> {
+      is ObdStartRecordingRequest -> {
         stream.write(148)
+        writeValue(stream, value.toList())
+      }
+      is ObdRecordingStateMessage -> {
+        stream.write(149)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1435,6 +1473,25 @@ interface NativeObdApi {
    * poller on the same connection.
    */
   fun startRecording(request: ObdStartRecordingRequest, callback: (Result<Boolean>) -> Unit)
+  /**
+   * Appends [modules]' setup and [steps] to the currently running
+   * recording's one-shot queue — each step is read exactly once (its
+   * `intervalMs` is ignored), using the given or already-planned module's
+   * setup, interleaved into the poller's idle time between due recurring
+   * steps so recurring steps keep their timing. Every command [modules] and
+   * [steps] carry has already passed the caller's own `CommandPolicy` and
+   * `HardGuard`, exactly like a plan's commands.
+   *
+   * Resolves [ObdOneShotEnqueueResultMessage.noActiveRecording] if no
+   * recording is running, and [ObdOneShotEnqueueResultMessage.queueFull]
+   * without queuing anything at all if the whole batch would not fit in the
+   * native-side bounded queue — never a partial enqueue, never a silent
+   * drop. Results are written to the recording's buffer like any other
+   * exchange (with an added `oneShot` field) and also delivered through
+   * [ObdEventsApi.onOneShotResult]. The queue is cleared when the recording
+   * ends.
+   */
+  fun enqueueOneShot(modules: List<ObdModuleMessage>, steps: List<ObdStepMessage>, callback: (Result<ObdOneShotEnqueueResultMessage>) -> Unit)
   /**
    * Stops the recording identified by [sessionId]; a mismatched or absent
    * id is a no-op. The underlying connection stays up, exactly like
@@ -1704,6 +1761,27 @@ interface NativeObdApi {
         }
       }
       run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.enqueueOneShot$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val modulesArg = args[0] as List<ObdModuleMessage>
+            val stepsArg = args[1] as List<ObdStepMessage>
+            api.enqueueOneShot(modulesArg, stepsArg) { result: Result<ObdOneShotEnqueueResultMessage> ->
+              val error = result.exceptionOrNull()
+              if (error != null) {
+                reply.reply(ObdApiPigeonUtils.wrapError(error))
+              } else {
+                val data = result.getOrNull()
+                reply.reply(ObdApiPigeonUtils.wrapResult(data))
+              }
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
         val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.stopRecording$separatedMessageChannelSuffix", codec)
         if (api != null) {
           channel.setMessageHandler { message, reply ->
@@ -1780,6 +1858,29 @@ class ObdEventsApi(private val binaryMessenger: BinaryMessenger, private val mes
     val channelName = "dev.flutter.pigeon.obdbridge.ObdEventsApi.onLinkState$separatedMessageChannelSuffix"
     val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
     channel.send(listOf(stateArg)) {
+      if (it is List<*>) {
+        if (it.size > 1) {
+          callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))
+        } else {
+          callback(Result.success(Unit))
+        }
+      } else {
+        callback(Result.failure(ObdApiPigeonUtils.createConnectionError(channelName)))
+      } 
+    }
+  }
+  /**
+   * One [NativeObdApi.enqueueOneShot] step's most recently attempted
+   * execution — display-only, same as [onLinkState]: a caller that misses
+   * an event (not yet listening, a dropped Flutter engine, …) can still
+   * recover every result from the recording's buffer once imported.
+   */
+  fun onOneShotResult(resultArg: ObdSignalExchangeMessage, callback: (Result<Unit>) -> Unit)
+{
+    val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
+    val channelName = "dev.flutter.pigeon.obdbridge.ObdEventsApi.onOneShotResult$separatedMessageChannelSuffix"
+    val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
+    channel.send(listOf(resultArg)) {
       if (it is List<*>) {
         if (it.size > 1) {
           callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))

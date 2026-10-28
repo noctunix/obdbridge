@@ -170,6 +170,19 @@ enum ObdRecordingStateValueMessage {
   interrupted,
 }
 
+/// Outcome of one [NativeObdApi.enqueueOneShot] call.
+enum ObdOneShotEnqueueResultMessage {
+  /// The whole batch was queued.
+  accepted,
+
+  /// Queuing the whole batch would have exceeded the native-side bound; none
+  /// of it was queued — never a partial enqueue.
+  queueFull,
+
+  /// No recording is currently running to queue the batch against.
+  noActiveRecording,
+}
+
 /// Native platform capability report for the OBD transport.
 /// Reported, never assumed — the UI and any later recording orchestration
 /// branch on this instead of `Platform.isIOS`.
@@ -1090,6 +1103,7 @@ class ObdRecordingStateMessage {
     required this.gapCount,
     this.writeError,
     required this.resumedAfterRestart,
+    required this.oneShotQueueDepth,
   });
 
   String? sessionId;
@@ -1113,6 +1127,12 @@ class ObdRecordingStateMessage {
   /// resumes one.
   bool resumedAfterRestart;
 
+  /// Number of steps still waiting in [NativeObdApi.enqueueOneShot]'s queue
+  /// for the currently running recording — `0` whenever none is running.
+  /// Lets a caller pace further enqueueing instead of racing the native-side
+  /// bound.
+  int oneShotQueueDepth;
+
   List<Object?> _toList() {
     return <Object?>[
       sessionId,
@@ -1122,6 +1142,7 @@ class ObdRecordingStateMessage {
       gapCount,
       writeError,
       resumedAfterRestart,
+      oneShotQueueDepth,
     ];
   }
 
@@ -1139,6 +1160,7 @@ class ObdRecordingStateMessage {
       gapCount: result[4]! as int,
       writeError: result[5] as String?,
       resumedAfterRestart: result[6]! as bool,
+      oneShotQueueDepth: result[7]! as int,
     );
   }
 
@@ -1158,7 +1180,8 @@ class ObdRecordingStateMessage {
         _deepEquals(bufferBytes, other.bufferBytes) &&
         _deepEquals(gapCount, other.gapCount) &&
         _deepEquals(writeError, other.writeError) &&
-        _deepEquals(resumedAfterRestart, other.resumedAfterRestart);
+        _deepEquals(resumedAfterRestart, other.resumedAfterRestart) &&
+        _deepEquals(oneShotQueueDepth, other.oneShotQueueDepth);
   }
 
   @override
@@ -1191,47 +1214,50 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is ObdRecordingStateValueMessage) {
       buffer.putUint8(134);
       writeValue(buffer, value.index);
-    } else if (value is ObdCapabilitiesMessage) {
+    } else if (value is ObdOneShotEnqueueResultMessage) {
       buffer.putUint8(135);
-      writeValue(buffer, value.encode());
-    } else if (value is ObdAdapterMessage) {
+      writeValue(buffer, value.index);
+    } else if (value is ObdCapabilitiesMessage) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    } else if (value is ObdLinkStateMessage) {
+    } else if (value is ObdAdapterMessage) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    } else if (value is ObdModuleMessage) {
+    } else if (value is ObdLinkStateMessage) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    } else if (value is ObdStepMessage) {
+    } else if (value is ObdModuleMessage) {
       buffer.putUint8(139);
       writeValue(buffer, value.encode());
-    } else if (value is ObdLimitsMessage) {
+    } else if (value is ObdStepMessage) {
       buffer.putUint8(140);
       writeValue(buffer, value.encode());
-    } else if (value is ObdPlanMessage) {
+    } else if (value is ObdLimitsMessage) {
       buffer.putUint8(141);
       writeValue(buffer, value.encode());
-    } else if (value is ObdSignalExchangeMessage) {
+    } else if (value is ObdPlanMessage) {
       buffer.putUint8(142);
       writeValue(buffer, value.encode());
-    } else if (value is ObdLiveStateMessage) {
+    } else if (value is ObdSignalExchangeMessage) {
       buffer.putUint8(143);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingNotificationMessage) {
+    } else if (value is ObdLiveStateMessage) {
       buffer.putUint8(144);
       writeValue(buffer, value.encode());
-    } else if (value is ObdBridgeConfigMessage) {
+    } else if (value is ObdRecordingNotificationMessage) {
       buffer.putUint8(145);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingOptionsMessage) {
+    } else if (value is ObdBridgeConfigMessage) {
       buffer.putUint8(146);
       writeValue(buffer, value.encode());
-    } else if (value is ObdStartRecordingRequest) {
+    } else if (value is ObdRecordingOptionsMessage) {
       buffer.putUint8(147);
       writeValue(buffer, value.encode());
-    } else if (value is ObdRecordingStateMessage) {
+    } else if (value is ObdStartRecordingRequest) {
       buffer.putUint8(148);
+      writeValue(buffer, value.encode());
+    } else if (value is ObdRecordingStateMessage) {
+      buffer.putUint8(149);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -1264,32 +1290,37 @@ class _PigeonCodec extends StandardMessageCodec {
             ? null
             : ObdRecordingStateValueMessage.values[value];
       case 135:
-        return ObdCapabilitiesMessage.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null
+            ? null
+            : ObdOneShotEnqueueResultMessage.values[value];
       case 136:
-        return ObdAdapterMessage.decode(readValue(buffer)!);
+        return ObdCapabilitiesMessage.decode(readValue(buffer)!);
       case 137:
-        return ObdLinkStateMessage.decode(readValue(buffer)!);
+        return ObdAdapterMessage.decode(readValue(buffer)!);
       case 138:
-        return ObdModuleMessage.decode(readValue(buffer)!);
+        return ObdLinkStateMessage.decode(readValue(buffer)!);
       case 139:
-        return ObdStepMessage.decode(readValue(buffer)!);
+        return ObdModuleMessage.decode(readValue(buffer)!);
       case 140:
-        return ObdLimitsMessage.decode(readValue(buffer)!);
+        return ObdStepMessage.decode(readValue(buffer)!);
       case 141:
-        return ObdPlanMessage.decode(readValue(buffer)!);
+        return ObdLimitsMessage.decode(readValue(buffer)!);
       case 142:
-        return ObdSignalExchangeMessage.decode(readValue(buffer)!);
+        return ObdPlanMessage.decode(readValue(buffer)!);
       case 143:
-        return ObdLiveStateMessage.decode(readValue(buffer)!);
+        return ObdSignalExchangeMessage.decode(readValue(buffer)!);
       case 144:
-        return ObdRecordingNotificationMessage.decode(readValue(buffer)!);
+        return ObdLiveStateMessage.decode(readValue(buffer)!);
       case 145:
-        return ObdBridgeConfigMessage.decode(readValue(buffer)!);
+        return ObdRecordingNotificationMessage.decode(readValue(buffer)!);
       case 146:
-        return ObdRecordingOptionsMessage.decode(readValue(buffer)!);
+        return ObdBridgeConfigMessage.decode(readValue(buffer)!);
       case 147:
-        return ObdStartRecordingRequest.decode(readValue(buffer)!);
+        return ObdRecordingOptionsMessage.decode(readValue(buffer)!);
       case 148:
+        return ObdStartRecordingRequest.decode(readValue(buffer)!);
+      case 149:
         return ObdRecordingStateMessage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1605,6 +1636,46 @@ class NativeObdApi {
     return pigeonVar_replyValue! as bool;
   }
 
+  /// Appends [modules]' setup and [steps] to the currently running
+  /// recording's one-shot queue — each step is read exactly once (its
+  /// `intervalMs` is ignored), using the given or already-planned module's
+  /// setup, interleaved into the poller's idle time between due recurring
+  /// steps so recurring steps keep their timing. Every command [modules] and
+  /// [steps] carry has already passed the caller's own `CommandPolicy` and
+  /// `HardGuard`, exactly like a plan's commands.
+  ///
+  /// Resolves [ObdOneShotEnqueueResultMessage.noActiveRecording] if no
+  /// recording is running, and [ObdOneShotEnqueueResultMessage.queueFull]
+  /// without queuing anything at all if the whole batch would not fit in the
+  /// native-side bounded queue — never a partial enqueue, never a silent
+  /// drop. Results are written to the recording's buffer like any other
+  /// exchange (with an added `oneShot` field) and also delivered through
+  /// [ObdEventsApi.onOneShotResult]. The queue is cleared when the recording
+  /// ends.
+  Future<ObdOneShotEnqueueResultMessage> enqueueOneShot(
+    List<ObdModuleMessage> modules,
+    List<ObdStepMessage> steps,
+  ) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.enqueueOneShot$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[modules, steps],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ObdOneShotEnqueueResultMessage;
+  }
+
   /// Stops the recording identified by [sessionId]; a mismatched or absent
   /// id is a no-op. The underlying connection stays up, exactly like
   /// [stopLive].
@@ -1686,6 +1757,12 @@ abstract class ObdEventsApi {
 
   void onLinkState(ObdLinkStateMessage state);
 
+  /// One [NativeObdApi.enqueueOneShot] step's most recently attempted
+  /// execution — display-only, same as [onLinkState]: a caller that misses
+  /// an event (not yet listening, a dropped Flutter engine, …) can still
+  /// recover every result from the recording's buffer once imported.
+  void onOneShotResult(ObdSignalExchangeMessage result);
+
   static void setUp(
     ObdEventsApi? api, {
     BinaryMessenger? binaryMessenger,
@@ -1708,6 +1785,32 @@ abstract class ObdEventsApi {
           final ObdLinkStateMessage arg_state = args[0]! as ObdLinkStateMessage;
           try {
             api.onLinkState(arg_state);
+            return wrapResponse(empty: true);
+          } on PlatformException catch (e) {
+            return wrapResponse(error: e);
+          } catch (e) {
+            return wrapResponse(
+              error: PlatformException(code: 'error', message: e.toString()),
+            );
+          }
+        });
+      }
+    }
+    {
+      final pigeonVar_channel = BasicMessageChannel<Object?>(
+        'dev.flutter.pigeon.obdbridge.ObdEventsApi.onOneShotResult$messageChannelSuffix',
+        pigeonChannelCodec,
+        binaryMessenger: binaryMessenger,
+      );
+      if (api == null) {
+        pigeonVar_channel.setMessageHandler(null);
+      } else {
+        pigeonVar_channel.setMessageHandler((Object? message) async {
+          final List<Object?> args = message! as List<Object?>;
+          final ObdSignalExchangeMessage arg_result =
+              args[0]! as ObdSignalExchangeMessage;
+          try {
+            api.onOneShotResult(arg_result);
             return wrapResponse(empty: true);
           } on PlatformException catch (e) {
             return wrapResponse(error: e);

@@ -393,6 +393,7 @@ class ObdRecordingStateMessage {
     required this.gapCount,
     this.writeError,
     required this.resumedAfterRestart,
+    required this.oneShotQueueDepth,
   });
 
   String? sessionId;
@@ -411,6 +412,25 @@ class ObdRecordingStateMessage {
   /// ever recognizes an abandoned recording as `interrupted`, it never
   /// resumes one.
   bool resumedAfterRestart;
+
+  /// Number of steps still waiting in [NativeObdApi.enqueueOneShot]'s queue
+  /// for the currently running recording — `0` whenever none is running.
+  /// Lets a caller pace further enqueueing instead of racing the native-side
+  /// bound.
+  int oneShotQueueDepth;
+}
+
+/// Outcome of one [NativeObdApi.enqueueOneShot] call.
+enum ObdOneShotEnqueueResultMessage {
+  /// The whole batch was queued.
+  accepted,
+
+  /// Queuing the whole batch would have exceeded the native-side bound; none
+  /// of it was queued — never a partial enqueue.
+  queueFull,
+
+  /// No recording is currently running to queue the batch against.
+  noActiveRecording,
 }
 
 /// Host API implemented in Kotlin (Android). Every method is total: it
@@ -486,6 +506,28 @@ abstract class NativeObdApi {
   @async
   bool startRecording(ObdStartRecordingRequest request);
 
+  /// Appends [modules]' setup and [steps] to the currently running
+  /// recording's one-shot queue — each step is read exactly once (its
+  /// `intervalMs` is ignored), using the given or already-planned module's
+  /// setup, interleaved into the poller's idle time between due recurring
+  /// steps so recurring steps keep their timing. Every command [modules] and
+  /// [steps] carry has already passed the caller's own `CommandPolicy` and
+  /// `HardGuard`, exactly like a plan's commands.
+  ///
+  /// Resolves [ObdOneShotEnqueueResultMessage.noActiveRecording] if no
+  /// recording is running, and [ObdOneShotEnqueueResultMessage.queueFull]
+  /// without queuing anything at all if the whole batch would not fit in the
+  /// native-side bounded queue — never a partial enqueue, never a silent
+  /// drop. Results are written to the recording's buffer like any other
+  /// exchange (with an added `oneShot` field) and also delivered through
+  /// [ObdEventsApi.onOneShotResult]. The queue is cleared when the recording
+  /// ends.
+  @async
+  ObdOneShotEnqueueResultMessage enqueueOneShot(
+    List<ObdModuleMessage> modules,
+    List<ObdStepMessage> steps,
+  );
+
   /// Stops the recording identified by [sessionId]; a mismatched or absent
   /// id is a no-op. The underlying connection stays up, exactly like
   /// [stopLive].
@@ -514,4 +556,10 @@ abstract class NativeObdApi {
 @FlutterApi()
 abstract class ObdEventsApi {
   void onLinkState(ObdLinkStateMessage state);
+
+  /// One [NativeObdApi.enqueueOneShot] step's most recently attempted
+  /// execution — display-only, same as [onLinkState]: a caller that misses
+  /// an event (not yet listening, a dropped Flutter engine, …) can still
+  /// recover every result from the recording's buffer once imported.
+  void onOneShotResult(ObdSignalExchangeMessage result);
 }
