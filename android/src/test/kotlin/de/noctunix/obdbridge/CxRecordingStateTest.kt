@@ -50,6 +50,7 @@ class CxRecordingStateTest {
             gapCount = 2,
             writeError = "disk full",
             resumedAfterRestart = false,
+            oneShotQueueDepth = 7,
         )
         val message = state.toMessage()
         assertEquals("session-1", message.sessionId)
@@ -58,5 +59,6 @@ class CxRecordingStateTest {
         assertEquals(2L, message.gapCount)
         assertEquals("disk full", message.writeError)
         assertFalse(message.resumedAfterRestart)
+        assertEquals(7L, message.oneShotQueueDepth)
     }
 }

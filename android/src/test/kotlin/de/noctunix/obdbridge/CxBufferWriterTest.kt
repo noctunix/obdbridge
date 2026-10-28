@@ -200,6 +200,27 @@ class CxBufferWriterTest {
         assertEquals("the gap near the start of the file must still be found via the full-scan fallback", 1, lastGap)
     }
 
+    @Test
+    fun oneShotFieldIsOmittedForAnOrdinaryExchangeAndTrueForAOneShotOne() {
+        val (file, writer) = newWriter()
+        writer.writeHeader("s", "fmt", "p", 1L, "tb", 0L)
+
+        writer.appendExchange("a", 0L, 0L, 0L, 0L, "tb", byteArrayOf(1), "ok")
+        writer.appendExchange("b", 0L, 0L, 0L, 0L, "tb", byteArrayOf(1), "ok", oneShot = true)
+        writer.close()
+
+        val lines = file.readLines()
+        val ordinary = JSONObject(lines[1])
+        val oneShot = JSONObject(lines[2])
+        assertFalse(
+            "an existing reader that does not know this field yet must see exactly the same " +
+                "line as before this feature existed",
+            ordinary.has("oneShot"),
+        )
+        assertTrue(oneShot.has("oneShot"))
+        assertTrue(oneShot.getBoolean("oneShot"))
+    }
+
     private fun closeUnderlyingStream(writer: CxBufferWriter) {
         val field = CxBufferWriter::class.java.getDeclaredField("writer")
         field.isAccessible = true

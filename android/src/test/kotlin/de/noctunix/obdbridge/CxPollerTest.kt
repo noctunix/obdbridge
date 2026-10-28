@@ -1,6 +1,7 @@
 package de.noctunix.obdbridge
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,8 +70,11 @@ private fun drive(clock: FakeClock, maxSteps: Int = 50, until: () -> Boolean = {
 }
 
 private val moduleA = ObdModuleMessage(moduleId = "m1", protocol = 6L, setup = listOf("ATSP6"))
+private val moduleB = ObdModuleMessage(moduleId = "m2", protocol = 6L, setup = listOf("ATSP6", "ATSH720"))
 private val stepA = ObdStepMessage(signalId = "sigA", moduleId = "m1", command = "222AB8", responseHeader = "77A", intervalMs = 1000L)
 private val stepB = ObdStepMessage(signalId = "sigB", moduleId = "m1", command = "222AF7", responseHeader = "77A", intervalMs = 1000L)
+private val oneShotStepA = ObdStepMessage(signalId = "oneShotA", moduleId = "m1", command = "222AC0", responseHeader = "77A", intervalMs = 0L)
+private val oneShotStepB = ObdStepMessage(signalId = "oneShotB", moduleId = "m2", command = "222AD0", responseHeader = "720", intervalMs = 0L)
 
 /** Robolectric is needed because [CxPoller] calls `SystemClock.elapsedRealtimeNanos()`, whose
  * stub in `android.jar` throws "not mocked" on a plain JVM. */
@@ -85,6 +89,7 @@ class CxPollerTest {
         onConsecutiveFailuresExceeded: (() -> Unit)? = null,
         onIdleVehicleDetected: (() -> Unit)? = null,
         sink: ((CxPollExchange) -> Unit)? = null,
+        oneShotQueueCapacity: Int = CxPoller.DEFAULT_ONE_SHOT_QUEUE_CAPACITY,
     ): CxPoller {
         val transport = ScriptedTransport { command -> responses[command] }
         val session = CxCommandSession(transport, clock)
@@ -102,6 +107,7 @@ class CxPollerTest {
             onConsecutiveFailuresExceeded = onConsecutiveFailuresExceeded,
             onIdleVehicleDetected = onIdleVehicleDetected,
             sink = sink,
+            oneShotQueueCapacity = oneShotQueueCapacity,
         )
     }
 
@@ -261,5 +267,124 @@ class CxPollerTest {
         drive(clock, maxSteps = 50)
 
         assertEquals("stop() must prevent every later poll, not just pause it", 1, exchanges.size)
+    }
+
+    @Test
+    fun aQueuedOneShotStepRunsOnceInTheIdleGapWithoutDelayingTheNextRecurringPoll() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>(
+            "ATSP6" to "OK",
+            "222AB8" to "622AB80005E3",
+            "222AC0" to "622AC0FF",
+        )
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = buildPoller(responses, clock, sink = { exchanges.add(it) })
+
+        poller.start(listOf(stepA))
+        // The first stepA cycle resolves synchronously; stepA is next due at t=1000.
+        assertEquals(1, exchanges.size)
+
+        val result = poller.enqueueOneShot(emptyList(), listOf(oneShotStepA))
+        assertEquals(ObdOneShotEnqueueResultMessage.ACCEPTED, result)
+
+        drive(clock, until = { exchanges.size >= 2 })
+        assertEquals(2, exchanges.size)
+        val oneShotExchange = exchanges[1]
+        assertEquals("oneShotA", oneShotExchange.signalId)
+        assertTrue(oneShotExchange.oneShot)
+        assertEquals(ObdTransportStatusMessage.OK, oneShotExchange.transport)
+        assertEquals(0, poller.oneShotQueueDepth)
+
+        drive(clock, maxSteps = 50, until = { exchanges.size >= 3 })
+        assertEquals("the recurring stepA cycle must still run at its own due time", 3, exchanges.size)
+        val secondStepA = exchanges[2]
+        assertEquals("sigA", secondStepA.signalId)
+        assertFalse(secondStepA.oneShot)
+    }
+
+    @Test
+    fun aOneShotStepAddressingADifferentModuleRunsThatModulesSetupFirst() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>(
+            "ATSP6" to "OK",
+            "ATSH720" to "OK",
+            "222AB8" to "622AB80005E3",
+            "222AD0" to "622AD0FF",
+        )
+        val writes = mutableListOf<String>()
+        val transport = ScriptedTransport { command ->
+            writes.add(command)
+            responses[command]
+        }
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to moduleA),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+        )
+
+        poller.start(listOf(stepA))
+        val result = poller.enqueueOneShot(listOf(moduleB), listOf(oneShotStepB))
+        assertEquals(ObdOneShotEnqueueResultMessage.ACCEPTED, result)
+        drive(clock, until = { writes.contains("222AD0") })
+
+        assertTrue("moduleB's setup must run before its one-shot step", writes.containsAll(listOf("ATSH720", "222AD0")))
+        assertTrue("ATSH720 must precede the step it sets up for", writes.indexOf("ATSH720") < writes.indexOf("222AD0"))
+    }
+
+    @Test
+    fun enqueueOneShotRejectsTheWholeBatchOnceItWouldExceedCapacity() {
+        val clock = FakeClock()
+        // stepA's own cycle issues at t=0 and sets the global rate-limit floor to t=100 — the
+        // window this test relies on so that the batch below sits in the queue unexamined,
+        // rather than one entry being dispatched (and dequeued) the instant it is enqueued.
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to "OK")
+        val poller = buildPoller(responses, clock, oneShotQueueCapacity = 2)
+        poller.start(listOf(stepA))
+
+        val first = poller.enqueueOneShot(emptyList(), listOf(oneShotStepA, oneShotStepA))
+        assertEquals(ObdOneShotEnqueueResultMessage.ACCEPTED, first)
+        assertEquals(2, poller.oneShotQueueDepth)
+
+        val second = poller.enqueueOneShot(emptyList(), listOf(oneShotStepA))
+        assertEquals(
+            "a batch that would exceed capacity must be rejected whole, not partially queued",
+            ObdOneShotEnqueueResultMessage.QUEUE_FULL,
+            second,
+        )
+        assertEquals(2, poller.oneShotQueueDepth)
+    }
+
+    @Test
+    fun stoppingThePollerClearsTheOneShotQueue() {
+        val clock = FakeClock()
+        // Same rate-limit window as above, so the queued one-shot below is still sitting
+        // unexamined in the queue when `stop()` runs, not already dispatched.
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to "OK", "222AC0" to "OK")
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = buildPoller(responses, clock, sink = { exchanges.add(it) })
+        poller.start(listOf(stepA))
+
+        poller.enqueueOneShot(emptyList(), listOf(oneShotStepA))
+        assertEquals(1, poller.oneShotQueueDepth)
+
+        poller.stop()
+
+        assertEquals(0, poller.oneShotQueueDepth)
+        assertEquals(
+            "a stopped poller must never run work left in the one-shot queue — the only " +
+                "exchange here is stepA's own synchronous first cycle, not the one-shot",
+            1,
+            exchanges.size,
+        )
+        assertEquals(
+            ObdOneShotEnqueueResultMessage.QUEUE_FULL,
+            poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),
+        )
     }
 }
