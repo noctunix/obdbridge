@@ -298,13 +298,33 @@ class CxRecordingService : Service() {
             timebaseId = timebaseId,
             rawBytes = exchange.rawBytes,
             transport = transportWireName(exchange.transport),
+            oneShot = exchange.oneShot,
         )
+        if (exchange.oneShot) {
+            ObdApi.getInstance(applicationContext).emitOneShotResult(
+                ObdSignalExchangeMessage(
+                    signalId = exchange.signalId,
+                    transport = exchange.transport,
+                    rawResponseText = if (exchange.transport == ObdTransportStatusMessage.OK) exchange.responseText else null,
+                    requestedAtEpochMs = exchange.requestedAtEpochMs,
+                    receivedAtEpochMs = exchange.receivedAtEpochMs,
+                    monotonicElapsedNs = exchange.monotonicElapsedNs,
+                ),
+            )
+        }
         if (bufferWriter.failed) {
             endRecordingInternal(CxRecordingPhase.INTERRUPTED, "buffer write failed", writeFailed = true)
         } else if (bufferWriter.limitReached) {
             endRecordingInternal(CxRecordingPhase.STOPPED, "buffer size limit reached")
         }
     }
+
+    /** Forwards to [poller]'s own queue, called by [ObdApi.enqueueOneShot] — `null` only in the
+     * brief window between [beginRecording]/[resumeAfterReconnect] starting and [startPolling]
+     * actually installing a poller, during which this recording cannot yet accept one-shot
+     * work. */
+    internal fun enqueueOneShot(modules: List<ObdModuleMessage>, steps: List<ObdStepMessage>): ObdOneShotEnqueueResultMessage =
+        poller?.enqueueOneShot(modules, steps) ?: ObdOneShotEnqueueResultMessage.NO_ACTIVE_RECORDING
 
     /** Starts the reconnect sequence for a lost connection, or does nothing if one is already
      * running — the single place a backoff chain actually begins. A disconnect/failure
@@ -492,6 +512,7 @@ class CxRecordingService : Service() {
         gapCount = writer?.gaps ?: 0,
         writeError = writeError,
         resumedAfterRestart = false,
+        oneShotQueueDepth = poller?.oneShotQueueDepth ?: 0,
     )
 
     // ── adapter setup ────────────────────────────────────────────────────

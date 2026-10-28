@@ -544,6 +544,25 @@ internal constructor(
         callback(Result.success(true))
     }
 
+    /** Forwards to [recordingOwner]'s own poller — see [CxRecordingService.enqueueOneShot] for
+     * why that, rather than this class, owns the actual queue. */
+    override fun enqueueOneShot(
+        modules: List<ObdModuleMessage>,
+        steps: List<ObdStepMessage>,
+        callback: (Result<ObdOneShotEnqueueResultMessage>) -> Unit,
+    ) {
+        val result = recordingOwner?.enqueueOneShot(modules, steps) ?: ObdOneShotEnqueueResultMessage.NO_ACTIVE_RECORDING
+        callback(Result.success(result))
+    }
+
+    /** [CxRecordingService.onExchange] calls this for every [CxPollExchange.oneShot] result —
+     * [ObdEventsApi] is display-only like every other event this class forwards, never the only
+     * way to learn a one-shot's outcome (the recording's own buffer carries it too, with the
+     * same `oneShot` field — see `CxBufferWriter`'s class doc). */
+    internal fun emitOneShotResult(result: ObdSignalExchangeMessage) {
+        eventsApi?.onOneShotResult(result) {}
+    }
+
     override fun stopRecording(sessionId: String, callback: (Result<Unit>) -> Unit) {
         recordingOwner?.let { owner -> if (owner.sessionId == sessionId) owner.requestStop() }
         callback(Result.success(Unit))
