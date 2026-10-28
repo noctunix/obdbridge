@@ -24,6 +24,10 @@ import java.io.RandomAccessFile
  * `overflow`, `disconnected`, `rejectedByGuard`, `writeFailed`, `cancelled` (the same spelling
  * [ObdTransportStatusMessage]'s Dart enum uses), not a Kotlin enum name.
  *
+ * [appendExchange]'s `oneShot` field is present, always `true`, only on a line from
+ * [CxPoller.enqueueOneShot]'s queue; omitted (never `false`) on every ordinary, planned exchange,
+ * so an existing reader that does not know the field yet keeps working unchanged.
+ *
  * [maxBufferBytes] is enforced after the fact, not by refusing to write: [limitReached] is set
  * once this writer's own running byte count would exceed it, and the caller ([CxPoller]/
  * [CxRecordingService]) is the one that stops polling and ends the recording visibly once it
@@ -110,6 +114,7 @@ class CxBufferWriter(path: String, private val maxBufferBytes: Long) : AutoClose
         timebaseId: String,
         rawBytes: ByteArray,
         transport: String,
+        oneShot: Boolean = false,
     ): Long {
         if (failed || limitReached) return sequence
         val nextSequence = sequence + 1
@@ -124,6 +129,7 @@ class CxBufferWriter(path: String, private val maxBufferBytes: Long) : AutoClose
                 put("timebaseId", timebaseId)
                 put("raw", toHex(rawBytes))
                 put("transport", transport)
+                if (oneShot) put("oneShot", true)
             },
         )
         // A failure inside writeLine above must not bump the sequence counter — committing a

@@ -9,7 +9,10 @@ import java.util.concurrent.ConcurrentHashMap
  * [ObdTransportStatusMessage.OK], or whatever partial bytes had already arrived for a
  * timeout/overflow/disconnect/cancellation, empty for every outcome that never reached the wire
  * at all. [responseText] is the already-decoded companion carried alongside for the live view,
- * which caches text, not bytes — a buffer writer must use [rawBytes], never re-encode this. */
+ * which caches text, not bytes — a buffer writer must use [rawBytes], never re-encode this.
+ * [oneShot] is `true` for a step that came from [CxPoller.enqueueOneShot] rather than the
+ * original plan's recurring steps — carried through to [CxBufferWriter.appendExchange]'s own
+ * `oneShot` field and to [ObdEventsApi.onOneShotResult]. */
 @Suppress("ArrayInDataClass")
 data class CxPollExchange(
     val signalId: String,
@@ -21,6 +24,7 @@ data class CxPollExchange(
     val receivedAtEpochMs: Long,
     val monotonicElapsedNs: Long,
     val durationNs: Long,
+    val oneShot: Boolean = false,
 )
 
 /**
@@ -40,6 +44,12 @@ data class CxPollExchange(
  * optional [sink]/[onConsecutiveFailuresExceeded]/[onIdleVehicleDetected] parameters exist for
  * the recording's extra requirements (buffering every exchange, ending on a connection that
  * stopped answering, recognizing a parked vehicle) and are simply left `null` by the live view.
+ *
+ * [enqueueOneShot] additionally lets a caller append plan-shaped, read-once work
+ * ([ObdApi.enqueueOneShot] only ever calls this for a recording's poller, never the live view's)
+ * that [scheduleNext] interleaves into whatever idle time appears between two due recurring
+ * steps, at most one queued step per idle gap so a recurring step is never delayed by more than
+ * one step's own duration.
  */
 class CxPoller(
     private val session: CxCommandSession,
@@ -68,6 +78,9 @@ class CxPoller(
     private val onConsecutiveFailuresExceeded: (() -> Unit)? = null,
     private val onIdleVehicleDetected: (() -> Unit)? = null,
     private val sink: ((CxPollExchange) -> Unit)? = null,
+    /** Upper bound on [oneShotQueueDepth] — [enqueueOneShot] rejects a batch outright, queuing
+     * none of it, once accepting it would exceed this. */
+    private val oneShotQueueCapacity: Int = DEFAULT_ONE_SHOT_QUEUE_CAPACITY,
 ) {
     /** [lastRunAtMs] (`-1` until the first run) breaks ties in [scheduleNext] between two entries
      * whose effective due time (after the global rate-limit floor) comes out equal — without it,
@@ -97,6 +110,20 @@ class CxPoller(
     private var activeModuleId: String? = null
     private var scheduledTask: CxScheduledTask? = null
 
+    /** Steps queued by [enqueueOneShot], read exactly once each, in FIFO order — never one timer
+     * per entry, the same single-scheduling-loop design [scheduleNext] already uses for
+     * [entries]. */
+    private val oneShotQueue = ArrayDeque<ObdStepMessage>()
+
+    /** Modules [enqueueOneShot] introduced that were not already part of the original plan (or
+     * that override one that was) — consulted by [moduleFor] alongside [modules] itself, which
+     * stays whatever [start] was constructed with. */
+    private val oneShotModuleOverrides = mutableMapOf<String, ObdModuleMessage>()
+
+    /** Number of steps still waiting in [oneShotQueue] — what [CxRecordingService] reports as
+     * [ObdRecordingStateMessage.oneShotQueueDepth]. */
+    val oneShotQueueDepth: Int get() = oneShotQueue.size
+
     fun start(steps: List<ObdStepMessage>) {
         val now = clock.now()
         entries = steps.map { Entry(it, now) }
@@ -107,6 +134,29 @@ class CxPoller(
         stopped = true
         scheduledTask?.cancel()
         scheduledTask = null
+        // A stopped poller never runs anything queued here again — see CxRecordingService's own
+        // "queue cleared when the recording ends" requirement.
+        oneShotQueue.clear()
+    }
+
+    /** Appends [steps] to [oneShotQueue], merging [modules] into [oneShotModuleOverrides] first
+     * so a step addressing a module this poller does not already know the setup for (or one
+     * whose setup the caller wants to override) still resolves via [moduleFor]. Rejects the
+     * whole batch, queuing none of it, once `oneShotQueue.size + steps.size` would exceed
+     * [oneShotQueueCapacity] — never a partial enqueue, never a silent drop. A call after [stop]
+     * is also rejected this way: nothing is left running here to ever read it back out. */
+    fun enqueueOneShot(modules: List<ObdModuleMessage>, steps: List<ObdStepMessage>): ObdOneShotEnqueueResultMessage {
+        if (stopped || oneShotQueue.size + steps.size > oneShotQueueCapacity) {
+            return ObdOneShotEnqueueResultMessage.QUEUE_FULL
+        }
+        modules.forEach { oneShotModuleOverrides[it.moduleId] = it }
+        oneShotQueue.addAll(steps)
+        // Picks the new work up immediately, in whatever idle time is available right now,
+        // rather than waiting for a scheduled wake-up this enqueue happened to arrive before.
+        scheduledTask?.cancel()
+        scheduledTask = null
+        scheduleNext()
+        return ObdOneShotEnqueueResultMessage.ACCEPTED
     }
 
     /** Called after a resync attempt (success or failure) — a resync wipes the adapter's module
@@ -116,20 +166,41 @@ class CxPoller(
         activeModuleId = null
     }
 
+    /** The one scheduling decision this whole class makes: whether to run a due recurring entry,
+     * spend idle time on a queued one-shot step, or merely arm a wake-up for whichever of those
+     * becomes possible first. Always recomputed from scratch rather than trusting whatever an
+     * earlier call decided — the only way [enqueueOneShot] can make freshly queued work run in
+     * an idle gap that was already being waited out, and the only way a recurring step that
+     * becomes due while a one-shot is running gets picked up the instant that one-shot's own
+     * callback calls back in here, rather than only once the one-shot's own, unrelated interval
+     * would have fired anyway. */
     private fun scheduleNext() {
-        if (stopped || entries.isEmpty()) return
+        if (stopped) return
         val earliestAllowedMs = lastIssuedAtMs?.let { it + minGlobalIntervalMs } ?: 0L
+        val now = clock.now()
         val next = entries.minWithOrNull(
             compareBy({ maxOf(it.nextDueAtMs, earliestAllowedMs) }, { it.lastRunAtMs }),
-        ) ?: return
-        val dueAtMs = maxOf(next.nextDueAtMs, earliestAllowedMs)
-        val delay = (dueAtMs - clock.now()).coerceAtLeast(0L)
-        if (delay <= 0L) {
+        )
+        val recurringDueAtMs = next?.let { maxOf(it.nextDueAtMs, earliestAllowedMs) }
+        if (recurringDueAtMs != null && recurringDueAtMs <= now) {
             scheduledTask = null
-            runEntry(next)
-        } else {
-            scheduledTask = clock.schedule(delay) { runEntry(next) }
+            runEntry(next!!)
+            return
         }
+        if (oneShotQueue.isNotEmpty() && now >= earliestAllowedMs) {
+            // Idle time before the next due recurring step (or no recurring step at all) —
+            // spend exactly one of it on a queued one-shot, then let the next `scheduleNext()`
+            // call (from that step's own completion callback) re-check whether a recurring step
+            // has since become due, rather than draining the whole queue in one go.
+            scheduledTask = null
+            runOneShot(oneShotQueue.removeFirst())
+            return
+        }
+        val wakeAtMs = listOfNotNull(
+            recurringDueAtMs,
+            if (oneShotQueue.isNotEmpty()) maxOf(earliestAllowedMs, now) else null,
+        ).minOrNull() ?: return
+        scheduledTask = clock.schedule((wakeAtMs - now).coerceAtLeast(0L)) { scheduleNext() }
     }
 
     private fun runEntry(entry: Entry) {
@@ -140,7 +211,38 @@ class CxPoller(
             onOrphaned?.invoke()
             return
         }
-        val module = modules[entry.step.moduleId]
+        ensureModuleSelected(entry.step.moduleId) { ok ->
+            if (stopped) return@ensureModuleSelected
+            if (ok) {
+                pollStep(entry)
+            } else {
+                // A failed module-setup step typically means the adapter is already mid-resync
+                // (a `TIMEOUT` requires one) — issuing the read anyway would queue it behind
+                // that resync and let it go out *after* `ATZ` resets everything to the default
+                // header, i.e. as a functional broadcast to the whole bus, not the physically
+                // addressed module this plan compiled. Recording a failure and waiting for the
+                // next cycle is the only safe choice here.
+                recordFailure(entry, ObdTransportStatusMessage.WRITE_FAILED)
+            }
+        }
+    }
+
+    private fun runOneShot(step: ObdStepMessage) {
+        if (stopped) return
+        ensureModuleSelected(step.moduleId) { ok ->
+            if (stopped) return@ensureModuleSelected
+            if (ok) pollOneShot(step) else reportOneShotFailure(step, ObdTransportStatusMessage.WRITE_FAILED)
+        }
+    }
+
+    /** [moduleFor]'s module (the given or already-planned one — see [enqueueOneShot]'s own doc
+     * comment) is re-selected via [runModuleSetup] only if it is not already the adapter's
+     * active module; shared by [runEntry] and [runOneShot] since a one-shot step addresses its
+     * module exactly like a planned step does and must go through the identical
+     * switch-then-run sequence, satisfying "a protocol switch between modules is handled like
+     * planned modules" for one-shot steps too. */
+    private fun ensureModuleSelected(moduleId: String, onDone: (Boolean) -> Unit) {
+        val module = moduleFor(moduleId)
         if (module != null && activeModuleId != module.moduleId) {
             runModuleSetup(module) { ok ->
                 if (stopped) return@runModuleSetup
@@ -149,22 +251,14 @@ class CxPoller(
                 // already have gone out), so neither the old nor the new module can be assumed
                 // selected; the next poll re-sends setup for whatever module it needs next.
                 activeModuleId = if (ok) module.moduleId else null
-                if (ok) {
-                    pollStep(entry)
-                } else {
-                    // A failed module-setup step typically means the adapter is already mid-resync
-                    // (a `TIMEOUT` requires one) — issuing the read anyway would queue it behind
-                    // that resync and let it go out *after* `ATZ` resets everything to the default
-                    // header, i.e. as a functional broadcast to the whole bus, not the physically
-                    // addressed module this plan compiled. Recording a failure and waiting for the
-                    // next cycle is the only safe choice here.
-                    recordFailure(entry, ObdTransportStatusMessage.WRITE_FAILED)
-                }
+                onDone(ok)
             }
         } else {
-            pollStep(entry)
+            onDone(true)
         }
     }
+
+    private fun moduleFor(moduleId: String): ObdModuleMessage? = oneShotModuleOverrides[moduleId] ?: modules[moduleId]
 
     private fun runModuleSetup(module: ObdModuleMessage, onDone: (Boolean) -> Unit) {
         fun runNext(index: Int) {
@@ -277,6 +371,77 @@ class CxPoller(
         if (!stopped) scheduleNext()
     }
 
+    /** [runOneShot]'s counterpart to [pollStep]: issues [step]'s command exactly once —
+     * [ObdStepMessage.intervalMs] is never read, there is no `nextDueAtMs` to update, the step
+     * is simply gone once this attempt resolves. A one-shot read counts towards
+     * [maxConsecutiveFailures] on failure like any other vehicle read (it says exactly as much
+     * about whether the connection is still trustworthy), but deliberately never towards
+     * [noDataFlags]/[updateIdleVehicleTracking] — "every *planned* signal reads NO DATA" is a
+     * statement about a parked vehicle's bus, which an ad hoc one-shot query has no bearing on
+     * either way. */
+    private fun pollOneShot(step: ObdStepMessage) {
+        if (stopped) return
+        val requestedAtEpochMs = System.currentTimeMillis()
+        val startNanos = SystemClock.elapsedRealtimeNanos()
+        lastIssuedAtMs = clock.now()
+        session.execute(step.command, deadlineMs) { result ->
+            if (stopped) return@execute
+            val receivedAtEpochMs = System.currentTimeMillis()
+            val nowNanos = SystemClock.elapsedRealtimeNanos()
+            val monotonicElapsedNs = nowNanos - monotonicBaseNs
+            val durationNs = nowNanos - startNanos
+            val transport = toTransportStatusMessage(result.outcome)
+            // Reported to the sink before the bookkeeping below, the same ordering `pollStep`
+            // uses and for the same reason: a reaction to `onFailure()` below can itself end the
+            // recording, and this exchange must already be in the buffer by then.
+            sink?.invoke(
+                CxPollExchange(
+                    signalId = step.signalId,
+                    transport = transport,
+                    responseText = result.responseText,
+                    rawBytes = result.rawBytes.toByteArray(),
+                    requestedAtEpochMs = requestedAtEpochMs,
+                    receivedAtEpochMs = receivedAtEpochMs,
+                    monotonicElapsedNs = monotonicElapsedNs,
+                    durationNs = durationNs,
+                    oneShot = true,
+                ),
+            )
+            if (transport == ObdTransportStatusMessage.OK) {
+                consecutiveFailures = 0
+            } else {
+                // Same reasoning as `pollStep`'s own branch: a resync this failure can trigger
+                // wipes the adapter's module selection.
+                activeModuleId = null
+                onFailure()
+            }
+            if (!stopped) scheduleNext()
+        }
+    }
+
+    /** [runOneShot]'s counterpart to [recordFailure] — a one-shot step's module-setup failure,
+     * reported the same way: no write to the bus, no `nextDueAtMs` bookkeeping (there is none
+     * for a one-shot step), the step is simply gone either way. */
+    private fun reportOneShotFailure(step: ObdStepMessage, transport: ObdTransportStatusMessage) {
+        val nowEpochMs = System.currentTimeMillis()
+        val monotonicElapsedNs = SystemClock.elapsedRealtimeNanos() - monotonicBaseNs
+        sink?.invoke(
+            CxPollExchange(
+                signalId = step.signalId,
+                transport = transport,
+                responseText = null,
+                rawBytes = ByteArray(0),
+                requestedAtEpochMs = nowEpochMs,
+                receivedAtEpochMs = nowEpochMs,
+                monotonicElapsedNs = monotonicElapsedNs,
+                durationNs = 0L,
+                oneShot = true,
+            ),
+        )
+        onFailure()
+        if (!stopped) scheduleNext()
+    }
+
     /** Common bookkeeping for any non-OK poll attempt, module-setup failure included: counts
      * towards [maxConsecutiveFailures] and, once over it, stops this poller and reports out —
      * the connection itself is left for the caller to tear down or retry, this class only
@@ -322,5 +487,9 @@ class CxPoller(
         CxCommandOutcome.QUIET_PERIOD_EXPIRED,
         CxCommandOutcome.RESYNC_NOT_CONFIGURED,
         -> ObdTransportStatusMessage.TIMEOUT
+    }
+
+    companion object {
+        const val DEFAULT_ONE_SHOT_QUEUE_CAPACITY = 4096
     }
 }

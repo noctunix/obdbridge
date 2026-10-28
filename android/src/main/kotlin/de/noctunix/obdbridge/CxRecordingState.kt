@@ -24,6 +24,9 @@ data class CxRecordingState(
     /** Always `false` in this package — [CxRecordingService] never restarts a recording on its
      * own after a process kill (a deliberate non-feature, not an oversight: see its class doc). */
     val resumedAfterRestart: Boolean,
+    /** [CxPoller.oneShotQueueDepth] of this recording's poller, `0` once it is idle/gone — see
+     * [ObdRecordingStateMessage.oneShotQueueDepth]'s own doc comment. */
+    val oneShotQueueDepth: Int = 0,
 ) {
     fun toMessage(): ObdRecordingStateMessage = ObdRecordingStateMessage(
         sessionId = sessionId,
@@ -39,6 +42,7 @@ data class CxRecordingState(
         gapCount = gapCount.toLong(),
         writeError = writeError,
         resumedAfterRestart = resumedAfterRestart,
+        oneShotQueueDepth = oneShotQueueDepth.toLong(),
     )
 
     companion object {
@@ -50,6 +54,7 @@ data class CxRecordingState(
             gapCount = 0,
             writeError = null,
             resumedAfterRestart = false,
+            oneShotQueueDepth = 0,
         )
     }
 }
