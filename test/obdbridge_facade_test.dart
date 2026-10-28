@@ -25,6 +25,8 @@ class _DenyCommandsPolicy implements CommandPolicy {
 class _FakeNativeObdApi extends NativeObdApi {
   ObdPlanMessage? lastStartLivePlan;
   ObdStartRecordingRequest? lastStartRecordingRequest;
+  List<ObdModuleMessage>? lastEnqueuedModules;
+  List<ObdStepMessage>? lastEnqueuedSteps;
 
   @override
   Future<bool> startLive(ObdPlanMessage plan) async {
@@ -36,6 +38,16 @@ class _FakeNativeObdApi extends NativeObdApi {
   Future<bool> startRecording(ObdStartRecordingRequest request) async {
     lastStartRecordingRequest = request;
     return true;
+  }
+
+  @override
+  Future<ObdOneShotEnqueueResultMessage> enqueueOneShot(
+    List<ObdModuleMessage> modules,
+    List<ObdStepMessage> steps,
+  ) async {
+    lastEnqueuedModules = modules;
+    lastEnqueuedSteps = steps;
+    return ObdOneShotEnqueueResultMessage.accepted;
   }
 }
 
@@ -209,6 +221,68 @@ void main() {
 
       expect(result, isTrue);
       expect(fake.lastStartRecordingRequest, same(request));
+    });
+  });
+
+  group('ObdBridge.enqueueOneShot', () {
+    test(
+      'a policy-rejected command in steps never reaches the fake native API',
+      () async {
+        final fake = _FakeNativeObdApi();
+        final bridge = ObdBridge(
+          _DenyCommandsPolicy({'0105'}),
+          nativeApi: fake,
+        );
+
+        expect(
+          () => bridge.enqueueOneShot(const [], [_step('0105')]),
+          throwsA(isA<ObdBridgeCommandRejectedException>()),
+        );
+        expect(fake.lastEnqueuedSteps, isNull);
+      },
+    );
+
+    test(
+      'a hard-guard-rejected command is rejected even with an allow-all policy',
+      () async {
+        final fake = _FakeNativeObdApi();
+        final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+
+        final exception = _expectRejection(
+          () => bridge.enqueueOneShot(const [], [_step('22F190')]),
+        );
+        expect(exception.rejectedCommands, contains('22F190'));
+        expect(fake.lastEnqueuedSteps, isNull);
+      },
+    );
+
+    test('rejects a command hidden inside a one-shot module setup', () async {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+      final modules = [
+        ObdModuleMessage(moduleId: 'm1', protocol: 6, setup: ['ATPP0C']),
+      ];
+
+      final exception = _expectRejection(
+        () => bridge.enqueueOneShot(modules, const []),
+      );
+      expect(exception.rejectedCommands, contains('ATPP0C'));
+      expect(fake.lastEnqueuedModules, isNull);
+    });
+
+    test('an allowed batch passes through unchanged', () async {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+      final modules = [
+        ObdModuleMessage(moduleId: 'm1', protocol: 6, setup: ['ATSP6']),
+      ];
+      final steps = [_step('0100')];
+
+      final result = await bridge.enqueueOneShot(modules, steps);
+
+      expect(result, ObdOneShotEnqueueResultMessage.accepted);
+      expect(fake.lastEnqueuedModules, same(modules));
+      expect(fake.lastEnqueuedSteps, same(steps));
     });
   });
 }

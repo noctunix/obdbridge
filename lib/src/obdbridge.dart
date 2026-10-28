@@ -94,6 +94,23 @@ class ObdBridge {
     return _native.startRecording(request);
   }
 
+  /// Checks every command [modules]' setup and [steps] carry against
+  /// [policy] exactly like [startLive]/[startRecording]; throws
+  /// [ObdBridgeCommandRejectedException] without calling native at all if
+  /// any is rejected. Otherwise forwards to
+  /// [NativeObdApi.enqueueOneShot] — see its doc comment for what native
+  /// does with the batch.
+  Future<ObdOneShotEnqueueResultMessage> enqueueOneShot(
+    List<ObdModuleMessage> modules,
+    List<ObdStepMessage> steps,
+  ) {
+    _checkCommands([
+      ...modules.expand((module) => module.setup),
+      ...steps.map((step) => step.command),
+    ]);
+    return _native.enqueueOneShot(modules, steps);
+  }
+
   Future<void> stopRecording(String sessionId) =>
       _native.stopRecording(sessionId);
 
@@ -103,26 +120,27 @@ class ObdBridge {
       _native.acknowledgeImported(sessionId, lastSequence);
 
   void _checkPlan(ObdPlanMessage plan) {
+    _checkCommands([
+      ...plan.init,
+      ...plan.resync,
+      ...plan.modules.expand((module) => module.setup),
+      ...plan.steps.map((step) => step.command),
+    ]);
+  }
+
+  /// Runs every command in [commands] through [_filter]; throws
+  /// [ObdBridgeCommandRejectedException] listing every rejected one if any
+  /// is rejected, otherwise returns without side effects.
+  void _checkCommands(Iterable<String> commands) {
     final rejectedCommands = <String>[];
     final reasons = <String>[];
-
-    void checkAll(Iterable<String> commands) {
-      for (final command in commands) {
-        final result = _filter.check(command);
-        if (result is GuardRejected) {
-          rejectedCommands.add(command);
-          reasons.add(result.reason);
-        }
+    for (final command in commands) {
+      final result = _filter.check(command);
+      if (result is GuardRejected) {
+        rejectedCommands.add(command);
+        reasons.add(result.reason);
       }
     }
-
-    checkAll(plan.init);
-    checkAll(plan.resync);
-    for (final module in plan.modules) {
-      checkAll(module.setup);
-    }
-    checkAll(plan.steps.map((step) => step.command));
-
     if (rejectedCommands.isNotEmpty) {
       throw ObdBridgeCommandRejectedException(rejectedCommands, reasons);
     }
