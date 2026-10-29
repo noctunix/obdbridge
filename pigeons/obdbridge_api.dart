@@ -157,6 +157,7 @@ class ObdLimitsMessage {
     this.onConsecutiveFailures =
         ObdConsecutiveFailuresPolicyMessage.endRecording,
     required this.idleVehicleStopAfterMs,
+    this.quietModuleBackoffMs = 0,
     required this.reconnectBackoffMinMs,
     required this.reconnectBackoffMaxMs,
     required this.maxReconnectAttemptsPerGap,
@@ -183,6 +184,14 @@ class ObdLimitsMessage {
   /// `NO DATA` for this long — a parked vehicle whose bus has gone to sleep, not a transport
   /// failure.
   int idleVehicleStopAfterMs;
+
+  /// Recording-only: once three recurring reads in a row on one module (or
+  /// every one of its steps, if it has fewer) answer `NO DATA`, that module's
+  /// steps are held back for this long before a single read probes it again —
+  /// an ECU that went to sleep otherwise costs a full adapter timeout per
+  /// planned step. One-shot reads are unaffected. `0` (the default) disables
+  /// this.
+  int quietModuleBackoffMs;
   int reconnectBackoffMinMs;
   int reconnectBackoffMaxMs;
   int maxReconnectAttemptsPerGap;

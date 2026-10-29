@@ -91,6 +91,7 @@ class CxPollerTest {
         onIdleVehicleDetected: (() -> Unit)? = null,
         sink: ((CxPollExchange) -> Unit)? = null,
         oneShotQueueCapacity: Int = CxPoller.DEFAULT_ONE_SHOT_QUEUE_CAPACITY,
+        quietModuleBackoffMs: Long = 0L,
     ): CxPoller {
         val transport = ScriptedTransport { command -> responses[command] }
         val session = CxCommandSession(transport, clock)
@@ -110,6 +111,7 @@ class CxPollerTest {
             onIdleVehicleDetected = onIdleVehicleDetected,
             sink = sink,
             oneShotQueueCapacity = oneShotQueueCapacity,
+            quietModuleBackoffMs = quietModuleBackoffMs,
         )
     }
 
@@ -279,6 +281,92 @@ class CxPollerTest {
         drive(clock, maxSteps = 100)
 
         assertEquals("sigB answers real data every cycle, so the vehicle is never all-NO-DATA", 0, idleCalls)
+    }
+
+    @Test
+    fun aModuleAnsweringOnlyNoDataIsHeldBackAndProbedOncePerBackoff() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to "NO DATA", "222AF7" to "NO DATA")
+        val readAt = mutableListOf<Long>()
+        val poller = buildPoller(responses, clock, sink = { readAt.add(clock.now()) }, quietModuleBackoffMs = 60_000L)
+
+        poller.start(listOf(stepA, stepB))
+        drive(clock, maxSteps = 200, until = { readAt.size >= 8 })
+
+        // With only two steps, both answering NO DATA once already makes the module quiet; from
+        // then on a single probe per backoff instead of both steps every second.
+        assertEquals(listOf(0L, 100L, 60_100L, 120_100L, 180_100L, 240_100L, 300_100L, 360_100L), readAt)
+    }
+
+    @Test
+    fun aQuietModuleResumesItsNormalScheduleOnceItAnswersAgain() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to "NO DATA", "222AF7" to "NO DATA")
+        val readAt = mutableListOf<Long>()
+        val poller = buildPoller(responses, clock, sink = { readAt.add(clock.now()) }, quietModuleBackoffMs = 60_000L)
+
+        poller.start(listOf(stepA, stepB))
+        drive(clock, until = { readAt.size >= 3 })
+        val quietSince = clock.now()
+
+        responses["222AB8"] = "622AB80005E3"
+        responses["222AF7"] = "622AF700"
+        drive(clock, maxSteps = 400, until = { clock.now() >= quietSince + 120_000L })
+
+        val afterQuiet = readAt.drop(3)
+        assertEquals("nothing runs until the backoff ends", quietSince + 60_000L, afterQuiet.first())
+        assertTrue(
+            "both steps must be back on their 1 s interval after the probe, got ${afterQuiet.size} reads",
+            afterQuiet.size >= 100,
+        )
+    }
+
+    @Test
+    fun anAnswerOnTheSameModuleBreaksTheNoDataStreak() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to "NO DATA", "222AF7" to "622AF700")
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = buildPoller(responses, clock, sink = { exchanges.add(it) }, quietModuleBackoffMs = 60_000L)
+
+        poller.start(listOf(stepA, stepB))
+        drive(clock, maxSteps = 400, until = { clock.now() >= 30_000L })
+
+        assertTrue("sigB keeps answering, so the module never goes quiet", exchanges.count { it.signalId == "sigA" } >= 25)
+    }
+
+    @Test
+    fun noDataNeverHoldsAModuleBackWhenTheBackoffIsDisabled() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to "NO DATA", "222AF7" to "NO DATA")
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = buildPoller(responses, clock, sink = { exchanges.add(it) })
+
+        poller.start(listOf(stepA, stepB))
+        drive(clock, maxSteps = 400, until = { clock.now() >= 30_000L })
+
+        assertTrue(exchanges.size >= 50)
+    }
+
+    @Test
+    fun aQueuedOneShotRunsWhileTheOnlyRecurringModuleIsQuiet() {
+        val clock = FakeClock()
+        val responses = mutableMapOf<String, String?>(
+            "ATSP6" to "OK",
+            "222AB8" to "NO DATA",
+            "222AF7" to "NO DATA",
+            "222AC0" to "622AC0FF",
+        )
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = buildPoller(responses, clock, sink = { exchanges.add(it) }, quietModuleBackoffMs = 60_000L)
+
+        poller.start(listOf(stepA, stepB))
+        drive(clock, until = { exchanges.size >= 3 })
+        val quietSince = clock.now()
+        poller.enqueueOneShot(emptyList(), listOf(oneShotStepA))
+        drive(clock, maxSteps = 5, until = { exchanges.size > 3 })
+
+        assertEquals("oneShotA", exchanges.last().signalId)
+        assertTrue("the one-shot must not wait out the quiet module's backoff", clock.now() < quietSince + 1_000L)
     }
 
     @Test

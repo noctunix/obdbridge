@@ -265,6 +265,7 @@ class CxRecordingService : Service() {
             maxConsecutiveFailures = plan.limits.maxConsecutiveTimeouts.toInt(),
             onConsecutiveFailuresPolicy = plan.limits.onConsecutiveFailures,
             idleVehicleStopAfterMs = plan.limits.idleVehicleStopAfterMs,
+            quietModuleBackoffMs = plan.limits.quietModuleBackoffMs,
             onConsecutiveFailuresExceeded = { onConsecutiveFailuresExceeded(obd) },
             onIdleVehicleDetected = { endRecordingInternal(CxRecordingPhase.STOPPED, "vehicle idle, no data on any signal") },
             sink = { exchange -> onExchange(exchange, timebase.first) },

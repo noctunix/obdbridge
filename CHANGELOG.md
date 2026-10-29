@@ -1,3 +1,13 @@
+## Unreleased
+
+- `ObdLimitsMessage.quietModuleBackoffMs`: once three recurring reads in a
+  row on one module (or all of its steps, if it has fewer) answer `NO DATA`,
+  the module's steps are held back for this long, then a single read probes
+  it again; any other answer resumes its normal schedule. Saves a full
+  adapter timeout per planned step while an ECU sleeps (a parked or charging
+  vehicle) and leaves that time to queued one-shot reads. Default `0` keeps
+  the previous behavior.
+
 ## 0.2.1
 
 - `ObdLimitsMessage.onConsecutiveFailures`: set to `resyncAndContinue` to let

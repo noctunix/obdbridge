@@ -627,6 +627,15 @@ data class ObdLimitsMessage (
    * failure.
    */
   val idleVehicleStopAfterMs: Long,
+  /**
+   * Recording-only: once three recurring reads in a row on one module (or
+   * every one of its steps, if it has fewer) answer `NO DATA`, that module's
+   * steps are held back for this long before a single read probes it again —
+   * an ECU that went to sleep otherwise costs a full adapter timeout per
+   * planned step. One-shot reads are unaffected. `0` (the default) disables
+   * this.
+   */
+  val quietModuleBackoffMs: Long,
   val reconnectBackoffMinMs: Long,
   val reconnectBackoffMaxMs: Long,
   val maxReconnectAttemptsPerGap: Long,
@@ -648,12 +657,13 @@ data class ObdLimitsMessage (
       val maxConsecutiveTimeouts = pigeonVar_list[4] as Long
       val onConsecutiveFailures = pigeonVar_list[5] as ObdConsecutiveFailuresPolicyMessage
       val idleVehicleStopAfterMs = pigeonVar_list[6] as Long
-      val reconnectBackoffMinMs = pigeonVar_list[7] as Long
-      val reconnectBackoffMaxMs = pigeonVar_list[8] as Long
-      val maxReconnectAttemptsPerGap = pigeonVar_list[9] as Long
-      val maxRecordingMs = pigeonVar_list[10] as Long
-      val maxBufferBytes = pigeonVar_list[11] as Long
-      return ObdLimitsMessage(maxResponseBytes, adapterStepDeadlineMs, vehicleReadDeadlineMs, maxReadsPerSecond, maxConsecutiveTimeouts, onConsecutiveFailures, idleVehicleStopAfterMs, reconnectBackoffMinMs, reconnectBackoffMaxMs, maxReconnectAttemptsPerGap, maxRecordingMs, maxBufferBytes)
+      val quietModuleBackoffMs = pigeonVar_list[7] as Long
+      val reconnectBackoffMinMs = pigeonVar_list[8] as Long
+      val reconnectBackoffMaxMs = pigeonVar_list[9] as Long
+      val maxReconnectAttemptsPerGap = pigeonVar_list[10] as Long
+      val maxRecordingMs = pigeonVar_list[11] as Long
+      val maxBufferBytes = pigeonVar_list[12] as Long
+      return ObdLimitsMessage(maxResponseBytes, adapterStepDeadlineMs, vehicleReadDeadlineMs, maxReadsPerSecond, maxConsecutiveTimeouts, onConsecutiveFailures, idleVehicleStopAfterMs, quietModuleBackoffMs, reconnectBackoffMinMs, reconnectBackoffMaxMs, maxReconnectAttemptsPerGap, maxRecordingMs, maxBufferBytes)
     }
   }
   fun toList(): List<Any?> {
@@ -665,6 +675,7 @@ data class ObdLimitsMessage (
       maxConsecutiveTimeouts,
       onConsecutiveFailures,
       idleVehicleStopAfterMs,
+      quietModuleBackoffMs,
       reconnectBackoffMinMs,
       reconnectBackoffMaxMs,
       maxReconnectAttemptsPerGap,
@@ -680,7 +691,7 @@ data class ObdLimitsMessage (
       return true
     }
     val other = other as ObdLimitsMessage
-    return ObdApiPigeonUtils.deepEquals(this.maxResponseBytes, other.maxResponseBytes) && ObdApiPigeonUtils.deepEquals(this.adapterStepDeadlineMs, other.adapterStepDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.vehicleReadDeadlineMs, other.vehicleReadDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.maxReadsPerSecond, other.maxReadsPerSecond) && ObdApiPigeonUtils.deepEquals(this.maxConsecutiveTimeouts, other.maxConsecutiveTimeouts) && ObdApiPigeonUtils.deepEquals(this.onConsecutiveFailures, other.onConsecutiveFailures) && ObdApiPigeonUtils.deepEquals(this.idleVehicleStopAfterMs, other.idleVehicleStopAfterMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMinMs, other.reconnectBackoffMinMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMaxMs, other.reconnectBackoffMaxMs) && ObdApiPigeonUtils.deepEquals(this.maxReconnectAttemptsPerGap, other.maxReconnectAttemptsPerGap) && ObdApiPigeonUtils.deepEquals(this.maxRecordingMs, other.maxRecordingMs) && ObdApiPigeonUtils.deepEquals(this.maxBufferBytes, other.maxBufferBytes)
+    return ObdApiPigeonUtils.deepEquals(this.maxResponseBytes, other.maxResponseBytes) && ObdApiPigeonUtils.deepEquals(this.adapterStepDeadlineMs, other.adapterStepDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.vehicleReadDeadlineMs, other.vehicleReadDeadlineMs) && ObdApiPigeonUtils.deepEquals(this.maxReadsPerSecond, other.maxReadsPerSecond) && ObdApiPigeonUtils.deepEquals(this.maxConsecutiveTimeouts, other.maxConsecutiveTimeouts) && ObdApiPigeonUtils.deepEquals(this.onConsecutiveFailures, other.onConsecutiveFailures) && ObdApiPigeonUtils.deepEquals(this.idleVehicleStopAfterMs, other.idleVehicleStopAfterMs) && ObdApiPigeonUtils.deepEquals(this.quietModuleBackoffMs, other.quietModuleBackoffMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMinMs, other.reconnectBackoffMinMs) && ObdApiPigeonUtils.deepEquals(this.reconnectBackoffMaxMs, other.reconnectBackoffMaxMs) && ObdApiPigeonUtils.deepEquals(this.maxReconnectAttemptsPerGap, other.maxReconnectAttemptsPerGap) && ObdApiPigeonUtils.deepEquals(this.maxRecordingMs, other.maxRecordingMs) && ObdApiPigeonUtils.deepEquals(this.maxBufferBytes, other.maxBufferBytes)
   }
 
   override fun hashCode(): Int {
@@ -692,6 +703,7 @@ data class ObdLimitsMessage (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.maxConsecutiveTimeouts)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.onConsecutiveFailures)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.idleVehicleStopAfterMs)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.quietModuleBackoffMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.reconnectBackoffMinMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.reconnectBackoffMaxMs)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.maxReconnectAttemptsPerGap)

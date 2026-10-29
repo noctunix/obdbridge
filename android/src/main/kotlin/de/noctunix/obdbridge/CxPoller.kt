@@ -87,6 +87,12 @@ class CxPoller(
     /** Upper bound on [oneShotQueueDepth] — [enqueueOneShot] rejects a batch outright, queuing
      * none of it, once accepting it would exceed this. */
     private val oneShotQueueCapacity: Int = DEFAULT_ONE_SHOT_QUEUE_CAPACITY,
+    /** Once [QUIET_MODULE_NO_DATA_STREAK] recurring reads in a row on one module (or every one of
+     * its steps, if it has fewer) answer `NO DATA`, that module's steps are held back for this
+     * long, after which a single read probes whether it answers again. An ECU that went to sleep
+     * (a parked or charging vehicle) otherwise costs a full adapter timeout per planned step.
+     * `0` (the default) disables this. */
+    private val quietModuleBackoffMs: Long = 0L,
 ) {
     /** [lastRunAtMs] (`-1` until the first run) breaks ties in [scheduleNext] between two entries
      * whose effective due time (after the global rate-limit floor) comes out equal — without it,
@@ -107,6 +113,8 @@ class CxPoller(
     private var lastIssuedAtMs: Long? = null
 
     private var consecutiveFailures = 0
+    private val moduleNoDataStreaks = mutableMapOf<String, Int>()
+    private val moduleQuietUntilMs = mutableMapOf<String, Long>()
     private val noDataFlags = ConcurrentHashMap<String, Boolean>()
     private var allNoDataSinceMs: Long? = null
 
@@ -187,10 +195,13 @@ class CxPoller(
         if (stopped) return
         val earliestAllowedMs = lastIssuedAtMs?.let { it + minGlobalIntervalMs } ?: 0L
         val now = clock.now()
-        val next = entries.minWithOrNull(
-            compareBy({ maxOf(it.nextDueAtMs, earliestAllowedMs) }, { it.lastRunAtMs }),
+        fun dueAtMs(entry: Entry) = maxOf(
+            entry.nextDueAtMs,
+            earliestAllowedMs,
+            moduleQuietUntilMs[entry.step.moduleId] ?: 0L,
         )
-        val recurringDueAtMs = next?.let { maxOf(it.nextDueAtMs, earliestAllowedMs) }
+        val next = entries.minWithOrNull(compareBy({ dueAtMs(it) }, { it.lastRunAtMs }))
+        val recurringDueAtMs = next?.let { dueAtMs(it) }
         if (recurringDueAtMs != null && recurringDueAtMs <= now) {
             scheduledTask = null
             runEntry(next!!)
@@ -330,6 +341,7 @@ class CxPoller(
                 latestSuccessful[entry.step.signalId] = exchange
                 consecutiveFailures = 0
                 noDataFlags[entry.step.signalId] = (result.responseText == "NO DATA")
+                updateQuietModuleTracking(entry.step.moduleId, result.responseText == "NO DATA")
                 updateIdleVehicleTracking()
             } else {
                 // A TIMEOUT/OVERFLOW here starts `CxCommandSession`'s own quiet-wait-then-resync
@@ -499,6 +511,21 @@ class CxPoller(
         }
     }
 
+    private fun updateQuietModuleTracking(moduleId: String, noData: Boolean) {
+        if (quietModuleBackoffMs <= 0L) return
+        if (!noData) {
+            moduleNoDataStreaks.remove(moduleId)
+            moduleQuietUntilMs.remove(moduleId)
+            return
+        }
+        val streak = (moduleNoDataStreaks[moduleId] ?: 0) + 1
+        moduleNoDataStreaks[moduleId] = streak
+        val moduleStepCount = entries.count { it.step.moduleId == moduleId }
+        if (streak >= minOf(QUIET_MODULE_NO_DATA_STREAK, moduleStepCount)) {
+            moduleQuietUntilMs[moduleId] = clock.now() + quietModuleBackoffMs
+        }
+    }
+
     private fun updateIdleVehicleTracking() {
         val allNoData = entries.isNotEmpty() && entries.all { noDataFlags[it.step.signalId] == true }
         if (!allNoData) {
@@ -535,5 +562,6 @@ class CxPoller(
 
     companion object {
         const val DEFAULT_ONE_SHOT_QUEUE_CAPACITY = 4096
+        const val QUIET_MODULE_NO_DATA_STREAK = 3
     }
 }

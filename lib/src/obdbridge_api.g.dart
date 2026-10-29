@@ -496,6 +496,7 @@ class ObdLimitsMessage {
     this.onConsecutiveFailures =
         ObdConsecutiveFailuresPolicyMessage.endRecording,
     required this.idleVehicleStopAfterMs,
+    this.quietModuleBackoffMs = 0,
     required this.reconnectBackoffMinMs,
     required this.reconnectBackoffMaxMs,
     required this.maxReconnectAttemptsPerGap,
@@ -526,6 +527,14 @@ class ObdLimitsMessage {
   /// failure.
   int idleVehicleStopAfterMs;
 
+  /// Recording-only: once three recurring reads in a row on one module (or
+  /// every one of its steps, if it has fewer) answer `NO DATA`, that module's
+  /// steps are held back for this long before a single read probes it again —
+  /// an ECU that went to sleep otherwise costs a full adapter timeout per
+  /// planned step. One-shot reads are unaffected. `0` (the default) disables
+  /// this.
+  int quietModuleBackoffMs;
+
   int reconnectBackoffMinMs;
 
   int reconnectBackoffMaxMs;
@@ -548,6 +557,7 @@ class ObdLimitsMessage {
       maxConsecutiveTimeouts,
       onConsecutiveFailures,
       idleVehicleStopAfterMs,
+      quietModuleBackoffMs,
       reconnectBackoffMinMs,
       reconnectBackoffMaxMs,
       maxReconnectAttemptsPerGap,
@@ -570,11 +580,12 @@ class ObdLimitsMessage {
       maxConsecutiveTimeouts: result[4]! as int,
       onConsecutiveFailures: result[5]! as ObdConsecutiveFailuresPolicyMessage,
       idleVehicleStopAfterMs: result[6]! as int,
-      reconnectBackoffMinMs: result[7]! as int,
-      reconnectBackoffMaxMs: result[8]! as int,
-      maxReconnectAttemptsPerGap: result[9]! as int,
-      maxRecordingMs: result[10]! as int,
-      maxBufferBytes: result[11]! as int,
+      quietModuleBackoffMs: result[7]! as int,
+      reconnectBackoffMinMs: result[8]! as int,
+      reconnectBackoffMaxMs: result[9]! as int,
+      maxReconnectAttemptsPerGap: result[10]! as int,
+      maxRecordingMs: result[11]! as int,
+      maxBufferBytes: result[12]! as int,
     );
   }
 
@@ -594,6 +605,7 @@ class ObdLimitsMessage {
         _deepEquals(maxConsecutiveTimeouts, other.maxConsecutiveTimeouts) &&
         _deepEquals(onConsecutiveFailures, other.onConsecutiveFailures) &&
         _deepEquals(idleVehicleStopAfterMs, other.idleVehicleStopAfterMs) &&
+        _deepEquals(quietModuleBackoffMs, other.quietModuleBackoffMs) &&
         _deepEquals(reconnectBackoffMinMs, other.reconnectBackoffMinMs) &&
         _deepEquals(reconnectBackoffMaxMs, other.reconnectBackoffMaxMs) &&
         _deepEquals(
