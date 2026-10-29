@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.2
 
 - `ObdLimitsMessage.quietModuleBackoffMs`: once three recurring reads in a
   row on one module (or all of its steps, if it has fewer) answer `NO DATA`,
