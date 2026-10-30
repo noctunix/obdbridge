@@ -120,6 +120,14 @@ class CxPoller(
 
     @Volatile
     private var stopped = false
+
+    /** True from the moment [scheduleNext] hands a recurring or one-shot step to [runEntry]/
+     * [runOneShot] until that step's own completion path calls back in — the guard behind "exactly
+     * one poll in flight". Without it, [enqueueOneShot] arriving mid-read would start the
+     * still-due in-flight entry a second time (its `nextDueAtMs` only advances on completion), and
+     * every such enqueue would add another parallel chain that can also switch the adapter's
+     * module between another chain's setup and its read. */
+    private var pollInFlight = false
     private var entries: List<Entry> = emptyList()
     private var activeModuleId: String? = null
     private var scheduledTask: CxScheduledTask? = null
@@ -169,10 +177,13 @@ class CxPoller(
         modules.forEach { oneShotModuleOverrides[it.moduleId] = it }
         oneShotQueue.addAll(steps)
         // Picks the new work up immediately, in whatever idle time is available right now,
-        // rather than waiting for a scheduled wake-up this enqueue happened to arrive before.
-        scheduledTask?.cancel()
-        scheduledTask = null
-        scheduleNext()
+        // rather than waiting for a scheduled wake-up this enqueue happened to arrive before. A
+        // poll already in flight picks it up from its own completion instead.
+        if (!pollInFlight) {
+            scheduledTask?.cancel()
+            scheduledTask = null
+            scheduleNext()
+        }
         return ObdOneShotEnqueueResultMessage.ACCEPTED
     }
 
@@ -192,7 +203,7 @@ class CxPoller(
      * callback calls back in here, rather than only once the one-shot's own, unrelated interval
      * would have fired anyway. */
     private fun scheduleNext() {
-        if (stopped) return
+        if (stopped || pollInFlight) return
         val earliestAllowedMs = lastIssuedAtMs?.let { it + minGlobalIntervalMs } ?: 0L
         val now = clock.now()
         fun dueAtMs(entry: Entry) = maxOf(
@@ -204,6 +215,7 @@ class CxPoller(
         val recurringDueAtMs = next?.let { dueAtMs(it) }
         if (recurringDueAtMs != null && recurringDueAtMs <= now) {
             scheduledTask = null
+            pollInFlight = true
             runEntry(next!!)
             return
         }
@@ -213,6 +225,7 @@ class CxPoller(
             // call (from that step's own completion callback) re-check whether a recurring step
             // has since become due, rather than draining the whole queue in one go.
             scheduledTask = null
+            pollInFlight = true
             runOneShot(oneShotQueue.removeFirst())
             return
         }
@@ -356,6 +369,7 @@ class CxPoller(
                 onFailure()
             }
             entry.nextDueAtMs = clock.now() + entry.step.intervalMs
+            pollInFlight = false
             if (!stopped) scheduleNext()
         }
     }
@@ -389,6 +403,7 @@ class CxPoller(
         )
         onFailure()
         entry.nextDueAtMs = clock.now() + entry.step.intervalMs
+        pollInFlight = false
         if (!stopped) scheduleNext()
     }
 
@@ -436,6 +451,7 @@ class CxPoller(
                 activeModuleId = null
                 onFailure()
             }
+            pollInFlight = false
             if (!stopped) scheduleNext()
         }
     }
@@ -460,6 +476,7 @@ class CxPoller(
             ),
         )
         onFailure()
+        pollInFlight = false
         if (!stopped) scheduleNext()
     }
 

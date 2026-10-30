@@ -24,6 +24,30 @@ private class ScriptedTransport(private val responseFor: (String) -> String?) : 
     }
 }
 
+/** Like [ScriptedTransport], but a vehicle-read reply listed in [held] is only delivered once
+ * [release] is called — so a test can act while that read is still in flight. */
+private class HeldTransport(private val responseFor: (String) -> String?, private val held: Set<String>) : CxCommandTransport {
+    lateinit var session: CxCommandSession
+    val writes = mutableListOf<String>()
+    private val pending = ArrayDeque<String>()
+
+    override fun write(bytes: ByteArray): Boolean {
+        val command = String(bytes, Charsets.US_ASCII).removeSuffix("\r")
+        writes.add(command)
+        val response = responseFor(command) ?: return true
+        if (command in held) {
+            pending.addLast(response)
+        } else {
+            session.onNotification("$response\r>".toByteArray())
+        }
+        return true
+    }
+
+    fun release() {
+        while (pending.isNotEmpty()) session.onNotification("${pending.removeFirst()}\r>".toByteArray())
+    }
+}
+
 /** Same shape as `CxCommandSessionTest`'s own fake clock: fires whichever still-pending entry is
  * due soonest, not in scheduling order. */
 private class FakeClock : CxCommandClock {
@@ -44,6 +68,13 @@ private class FakeClock : CxCommandClock {
                 entry.cancelled = true
             }
         }
+    }
+
+    /** Moves time forward without firing anything — for a test that needs time to pass while a
+     * read is still in flight, before any scheduled entry is due. */
+    fun advanceTo(time: Long) {
+        check(entries.none { !it.cancelled && it.dueAt < time }) { "an entry is due before $time" }
+        currentTime = time
     }
 
     fun fireNextDue() {
@@ -281,6 +312,42 @@ class CxPollerTest {
         drive(clock, maxSteps = 100)
 
         assertEquals("sigB answers real data every cycle, so the vehicle is never all-NO-DATA", 0, idleCalls)
+    }
+
+    @Test
+    fun enqueueingWhileARecurringReadIsInFlightNeverStartsASecondPoll() {
+        val clock = FakeClock()
+        val responses = mapOf("ATSP6" to "OK", "222AB8" to "622AB80005E3", "222AC0" to "622AC0FF")
+        val transport = HeldTransport({ responses[it] }, held = setOf("222AB8"))
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to moduleA),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+            sink = { exchanges.add(it) },
+        )
+
+        poller.start(listOf(stepA))
+        // stepA's read is written and still waiting for its reply, past the global rate-limit
+        // spacing — the way a real read takes longer than `1000 / maxReadsPerSecond`.
+        clock.advanceTo(300L)
+        poller.enqueueOneShot(emptyList(), listOf(oneShotStepA))
+        poller.enqueueOneShot(emptyList(), listOf(oneShotStepA.copy(signalId = "oneShotA2")))
+        transport.release()
+        drive(clock, maxSteps = 20, until = { exchanges.size >= 3 || clock.now() >= 900L })
+
+        assertEquals(
+            "one recurring read per interval, however many batches arrived while it was in flight",
+            1,
+            transport.writes.count { it == "222AB8" },
+        )
+        assertEquals(listOf("sigA", "oneShotA", "oneShotA2"), exchanges.map { it.signalId })
     }
 
     @Test
