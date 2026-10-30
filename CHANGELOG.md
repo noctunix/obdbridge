@@ -1,3 +1,14 @@
+## 0.2.3
+
+- Fix: a recording's poller could run several polls at once.
+  `enqueueOneShot` arriving while a read was in flight started the
+  still-due recurring step a second time, and every such enqueue added
+  another parallel poll chain: recurring steps were read up to six times in
+  a row, and one chain could switch the adapter's module between another
+  chain's module setup and its read, so a reply could come from a different
+  module than the step addresses. Exactly one poll is in flight again;
+  queued one-shot work is picked up when it completes.
+
 ## 0.2.2
 
 - `ObdLimitsMessage.quietModuleBackoffMs`: once three recurring reads in a
