@@ -1,3 +1,18 @@
+## 0.2.4
+
+- Fix: a short-interval recurring step could go unread for minutes. The
+  poller ran whichever due step had become due first, so whenever many
+  long-interval steps were due at once (every step at the start of a
+  recording, and again every round once their total read time exceeded
+  their interval) all of them ran before a short step that became due
+  later. Among the due steps it now runs the one with the shortest
+  interval, then the one whose deadline (due time plus interval) comes
+  first: short-interval steps keep their cadence from the start, and
+  longer-interval steps get the read budget left over. Longer-interval
+  steps are therefore delayed indefinitely if shorter-interval steps alone
+  saturate the budget (`maxReadsPerSecond` and the time each read takes);
+  keep a plan's short-interval load well below it.
+
 ## 0.2.3
 
 - Fix: a recording's poller could run several polls at once.
