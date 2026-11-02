@@ -48,6 +48,22 @@ private class HeldTransport(private val responseFor: (String) -> String?, privat
     }
 }
 
+/** Answers every vehicle read only [readDurationMs] of [clock] time after it was written (module
+ * setup at once), so each read occupies the bus for a while the way a real one does. */
+private class DelayedTransport(private val clock: FakeClock, private val readDurationMs: Long) : CxCommandTransport {
+    lateinit var session: CxCommandSession
+
+    override fun write(bytes: ByteArray): Boolean {
+        val command = String(bytes, Charsets.US_ASCII).removeSuffix("\r")
+        if (command.startsWith("22")) {
+            clock.schedule(readDurationMs) { session.onNotification("62${command.drop(2)}00\r>".toByteArray()) }
+        } else {
+            session.onNotification("OK\r>".toByteArray())
+        }
+        return true
+    }
+}
+
 /** Same shape as `CxCommandSessionTest`'s own fake clock: fires whichever still-pending entry is
  * due soonest, not in scheduling order. */
 private class FakeClock : CxCommandClock {
@@ -107,6 +123,16 @@ private val stepB = ObdStepMessage(signalId = "sigB", moduleId = "m1", command =
 private val oneShotStepA = ObdStepMessage(signalId = "oneShotA", moduleId = "m1", command = "222AC0", responseHeader = "77A", intervalMs = 0L)
 private val oneShotStepB = ObdStepMessage(signalId = "oneShotB", moduleId = "m2", command = "222AD0", responseHeader = "720", intervalMs = 0L)
 
+private fun longIntervalSteps(count: Int, intervalMs: Long) = (0 until count).map {
+    ObdStepMessage(
+        signalId = "long$it",
+        moduleId = "m1",
+        command = "22%04X".format(0x1000 + it),
+        responseHeader = "77A",
+        intervalMs = intervalMs,
+    )
+}
+
 /** Robolectric is needed because [CxPoller] calls `SystemClock.elapsedRealtimeNanos()`, whose
  * stub in `android.jar` throws "not mocked" on a plain JVM. */
 @RunWith(RobolectricTestRunner::class)
@@ -144,6 +170,30 @@ class CxPollerTest {
             oneShotQueueCapacity = oneShotQueueCapacity,
             quietModuleBackoffMs = quietModuleBackoffMs,
         )
+    }
+
+    /** Runs [steps] over a [DelayedTransport] taking 100 ms per read until [untilMs] and returns
+     * every completed read as its signal id and completion time. */
+    private fun readsOverDelayedTransport(steps: List<ObdStepMessage>, untilMs: Long): List<Pair<String, Long>> {
+        val clock = FakeClock()
+        val transport = DelayedTransport(clock, readDurationMs = 100L)
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        val reads = mutableListOf<Pair<String, Long>>()
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to moduleA),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+            sink = { reads.add(it.signalId to clock.now()) },
+        )
+        poller.start(steps)
+        drive(clock, maxSteps = 10_000, until = { clock.now() >= untilMs })
+        poller.stop()
+        return reads
     }
 
     @Test
@@ -608,5 +658,31 @@ class CxPollerTest {
             ObdOneShotEnqueueResultMessage.QUEUE_FULL,
             poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),
         )
+    }
+
+    @Test
+    fun aShortIntervalStepKeepsItsCadenceWhileManyLongIntervalStepsAreDueAtStart() {
+        // stepA (1 s) listed after 50 steps at 60 s, all due at start: 5 s of reads ahead of it.
+        val reads = readsOverDelayedTransport(longIntervalSteps(50, intervalMs = 60_000L) + stepA, untilMs = 20_000L)
+        val shortReads = reads.filter { it.first == "sigA" }.map { it.second }
+        val gaps = shortReads.zipWithNext { a, b -> b - a }
+
+        assertTrue("the short step must not wait for every long step, first read at ${shortReads.first()}", shortReads.first() <= 200L)
+        assertTrue("the short step must keep its 1 s cadence, got gaps $gaps", gaps.all { it <= 1200L })
+        assertEquals("every long step is still read once", 50, reads.count { it.first.startsWith("long") })
+    }
+
+    @Test
+    fun overloadedLongIntervalStepsAreAllStillReadWhileAShortStepKeepsItsCadence() {
+        // 50 long steps x 100 ms = 5 s of reads per 4 s interval: more than the bus can serve.
+        val reads = readsOverDelayedTransport(longIntervalSteps(50, intervalMs = 4_000L) + stepA, untilMs = 60_000L)
+        val longCounts = reads.filter { it.first.startsWith("long") }.groupingBy { it.first }.eachCount()
+        val shortReads = reads.filter { it.first == "sigA" }.map { it.second }
+        val shortGaps = shortReads.zipWithNext { a, b -> b - a }
+
+        assertEquals(50, longCounts.size)
+        assertTrue("no long step may starve, got $longCounts", longCounts.values.all { it >= 8 })
+        assertTrue("the short step must run from the start, first read at ${shortReads.first()}", shortReads.first() <= 200L)
+        assertTrue("the short step must keep its 1 s cadence, got gaps $shortGaps", shortGaps.all { it <= 1200L })
     }
 }

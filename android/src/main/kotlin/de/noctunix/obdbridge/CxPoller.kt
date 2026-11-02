@@ -94,10 +94,10 @@ class CxPoller(
      * `0` (the default) disables this. */
     private val quietModuleBackoffMs: Long = 0L,
 ) {
-    /** [lastRunAtMs] (`-1` until the first run) breaks ties in [scheduleNext] between two entries
-     * whose effective due time (after the global rate-limit floor) comes out equal — without it,
-     * whichever entry happens first in [entries] would always win every such tie, starving every
-     * other entry forever once the global limit makes every due time converge on the same floor. */
+    /** [lastRunAtMs] (`-1` until the first run) breaks ties in [scheduleNext] between two due
+     * entries whose interval and deadline come out equal, in favour of the one that ran longest
+     * ago — without it, whichever entry happens first in [entries] would win every such tie, so a
+     * tie that keeps recurring would starve every entry behind it. */
     private class Entry(val step: ObdStepMessage, var nextDueAtMs: Long, var lastRunAtMs: Long = -1L)
 
     /** The latest *successful* ([ObdTransportStatusMessage.OK]) exchange per signal — kept
@@ -201,7 +201,17 @@ class CxPoller(
      * an idle gap that was already being waited out, and the only way a recurring step that
      * becomes due while a one-shot is running gets picked up the instant that one-shot's own
      * callback calls back in here, rather than only once the one-shot's own, unrelated interval
-     * would have fired anyway. */
+     * would have fired anyway.
+     *
+     * An entry is due once its effective due time (its own `nextDueAtMs`, the global rate-limit
+     * floor and any quiet-module hold) has passed. Among the due entries, the one with the
+     * shortest interval runs, and among those the one with the earliest deadline
+     * (`nextDueAtMs + intervalMs`): when many long-interval steps are due at once (every step
+     * right after [start], or a backlog whose total read time exceeds its interval), running
+     * them in release order would hold every short-interval step back for a whole round of them.
+     * Longer-interval steps only get the read budget the shorter ones leave over, so they are
+     * delayed indefinitely if shorter-interval steps alone saturate it; a plan's short-interval
+     * load must stay well below the budget. */
     private fun scheduleNext() {
         if (stopped || pollInFlight) return
         val earliestAllowedMs = lastIssuedAtMs?.let { it + minGlobalIntervalMs } ?: 0L
@@ -211,12 +221,13 @@ class CxPoller(
             earliestAllowedMs,
             moduleQuietUntilMs[entry.step.moduleId] ?: 0L,
         )
-        val next = entries.minWithOrNull(compareBy({ dueAtMs(it) }, { it.lastRunAtMs }))
-        val recurringDueAtMs = next?.let { dueAtMs(it) }
-        if (recurringDueAtMs != null && recurringDueAtMs <= now) {
+        val next = entries
+            .filter { dueAtMs(it) <= now }
+            .minWithOrNull(compareBy({ it.step.intervalMs }, { it.nextDueAtMs + it.step.intervalMs }, { it.lastRunAtMs }))
+        if (next != null) {
             scheduledTask = null
             pollInFlight = true
-            runEntry(next!!)
+            runEntry(next)
             return
         }
         if (oneShotQueue.isNotEmpty() && now >= earliestAllowedMs) {
@@ -230,7 +241,7 @@ class CxPoller(
             return
         }
         val wakeAtMs = listOfNotNull(
-            recurringDueAtMs,
+            entries.minOfOrNull { dueAtMs(it) },
             if (oneShotQueue.isNotEmpty()) maxOf(earliestAllowedMs, now) else null,
         ).minOrNull() ?: return
         scheduledTask = clock.schedule((wakeAtMs - now).coerceAtLeast(0L)) { scheduleNext() }
