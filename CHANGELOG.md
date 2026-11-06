@@ -1,3 +1,8 @@
+## 0.2.6
+
+- Android toolchain alignment: AGP 9.5.0, Kotlin 2.4.21, Gradle 9.8.2 (no API
+  changes).
+
 ## 0.2.5
 
 - Fix: a module-setup failure (and a failed vehicle read it already made
