@@ -1,3 +1,25 @@
+## 0.2.5
+
+- Fix: a module-setup failure (and a failed vehicle read it already made
+  unsafe to send) is now paced like a real read, not fired at CPU speed. A
+  connection that genuinely cannot write for a while — a BLE link stall, a
+  resync it cannot complete — previously had `CxPoller` drain its *entire*
+  one-shot queue as instant `writeFailed` results in one synchronous burst,
+  observed in the field as thousands of reads failing within a fraction of
+  a second and, in one reproduction, a `StackOverflowError`. Each such
+  failure now updates the same global rate-limit floor a dispatched read
+  does, so the poller waits out the plan's own read spacing before trying
+  the next queued step instead of recursing through the whole backlog —
+  the connection gets a real chance to recover before its backlog is
+  spent. `ObdLimitsMessage.maxReadsPerSecond` set to `unlimitedMaxReadsPerSecond`
+  (1000) or above still disables this pacing, same as it always disabled
+  read spacing.
+- `ObdModuleMessage.readDeadlineMs`: overrides `ObdLimitsMessage.vehicleReadDeadlineMs`
+  for every step addressing that module, for an ECU that legitimately
+  needs longer than the rest of the plan budgets for (one that keeps
+  extending ISO 14229-2 P2* with NRC 0x78/responsePending past the plan's
+  default). `null` (the default) keeps using the plan's own deadline.
+
 ## 0.2.4
 
 - Fix: a short-interval recurring step could go unread for minutes. The
