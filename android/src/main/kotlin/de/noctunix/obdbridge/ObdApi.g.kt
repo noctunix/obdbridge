@@ -508,7 +508,16 @@ data class ObdModuleMessage (
    * actually run.
    */
   val protocol: Long,
-  val setup: List<String>
+  val setup: List<String>,
+  /**
+   * Overrides `ObdLimitsMessage.vehicleReadDeadlineMs` for every step
+   * addressing this module, `null` to use the plan's own deadline. For an
+   * ECU that legitimately needs longer than the rest of the plan budgets
+   * for — one that answers NRC 0x78 (responsePending) and keeps extending
+   * P2* past the plan's default — rather than lengthening the deadline for
+   * every module just to accommodate the one slow one.
+   */
+  val readDeadlineMs: Long? = null
 )
  {
   companion object {
@@ -516,7 +525,8 @@ data class ObdModuleMessage (
       val moduleId = pigeonVar_list[0] as String
       val protocol = pigeonVar_list[1] as Long
       val setup = pigeonVar_list[2] as List<String>
-      return ObdModuleMessage(moduleId, protocol, setup)
+      val readDeadlineMs = pigeonVar_list[3] as Long?
+      return ObdModuleMessage(moduleId, protocol, setup, readDeadlineMs)
     }
   }
   fun toList(): List<Any?> {
@@ -524,6 +534,7 @@ data class ObdModuleMessage (
       moduleId,
       protocol,
       setup,
+      readDeadlineMs,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -534,7 +545,7 @@ data class ObdModuleMessage (
       return true
     }
     val other = other as ObdModuleMessage
-    return ObdApiPigeonUtils.deepEquals(this.moduleId, other.moduleId) && ObdApiPigeonUtils.deepEquals(this.protocol, other.protocol) && ObdApiPigeonUtils.deepEquals(this.setup, other.setup)
+    return ObdApiPigeonUtils.deepEquals(this.moduleId, other.moduleId) && ObdApiPigeonUtils.deepEquals(this.protocol, other.protocol) && ObdApiPigeonUtils.deepEquals(this.setup, other.setup) && ObdApiPigeonUtils.deepEquals(this.readDeadlineMs, other.readDeadlineMs)
   }
 
   override fun hashCode(): Int {
@@ -542,6 +553,7 @@ data class ObdModuleMessage (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.moduleId)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.protocol)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.setup)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.readDeadlineMs)
     return result
   }
 }

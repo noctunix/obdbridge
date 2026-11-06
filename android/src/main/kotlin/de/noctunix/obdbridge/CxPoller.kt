@@ -55,6 +55,8 @@ class CxPoller(
     private val session: CxCommandSession,
     private val clock: CxCommandClock,
     private val modules: Map<String, ObdModuleMessage>,
+    /** The vehicle-read deadline for any module whose own [ObdModuleMessage.readDeadlineMs] is
+     * `null` — see [readDeadlineMsFor]. */
     private val deadlineMs: Long,
     private val setupDeadlineMs: Long,
     maxReadsPerSecond: Int,
@@ -108,7 +110,12 @@ class CxPoller(
     val latestExchanges = ConcurrentHashMap<String, ObdSignalExchangeMessage>()
 
     /** Minimum spacing enforced between any two issued vehicle reads, regardless of which signal
-     * — the plan's rate budget is across the whole plan, not per step. */
+     * — the plan's rate budget is across the whole plan, not per step. A `maxReadsPerSecond` of
+     * `unlimitedMaxReadsPerSecond` (1000) or above is the caller's deliberate "no throttling"
+     * sentinel (integer division floors it to exactly 0) and must stay literally unlimited, not
+     * be floored to some minimum spacing here -- which also means [recordFailure] and
+     * [reportOneShotFailure]'s own pacing of a connection that cannot actually write does not
+     * apply under that setting; a caller choosing "unlimited" already accepted that trade-off. */
     private val minGlobalIntervalMs = (1000L / maxReadsPerSecond.coerceAtLeast(1))
     private var lastIssuedAtMs: Long? = null
 
@@ -304,6 +311,20 @@ class CxPoller(
 
     private fun moduleFor(moduleId: String): ObdModuleMessage? = oneShotModuleOverrides[moduleId] ?: modules[moduleId]
 
+    /** [deadlineMs], unless [moduleId]'s own [ObdModuleMessage.readDeadlineMs] overrides it for
+     * an ECU that genuinely needs longer than the rest of the plan budgets for. Checked on
+     * [oneShotModuleOverrides] and [modules] separately, falling back from one to the other,
+     * rather than through [moduleFor]'s single "whichever is registered" module: an
+     * [enqueueOneShot] call addressing a module the original plan already tuned a deadline for
+     * typically does not repeat that tuning (it only has a [ObdModuleMessage] at all because a
+     * step addressing an unfamiliar module needs one for its setup) — resolving this from
+     * [moduleFor]'s result alone would silently drop the plan's own deadline back to [deadlineMs]
+     * the moment any one-shot step first addresses that module. */
+    private fun readDeadlineMsFor(moduleId: String): Long =
+        oneShotModuleOverrides[moduleId]?.readDeadlineMs
+            ?: modules[moduleId]?.readDeadlineMs
+            ?: deadlineMs
+
     private fun runModuleSetup(module: ObdModuleMessage, onDone: (Boolean) -> Unit) {
         fun runNext(index: Int) {
             if (index >= module.setup.size) {
@@ -328,7 +349,7 @@ class CxPoller(
         val startNanos = SystemClock.elapsedRealtimeNanos()
         lastIssuedAtMs = clock.now()
         entry.lastRunAtMs = clock.now()
-        session.execute(entry.step.command, deadlineMs) { result ->
+        session.execute(entry.step.command, readDeadlineMsFor(entry.step.moduleId)) { result ->
             if (stopped) return@execute
             val receivedAtEpochMs = System.currentTimeMillis()
             val nowNanos = SystemClock.elapsedRealtimeNanos()
@@ -387,10 +408,16 @@ class CxPoller(
 
     /** Records [transport] as this [entry]'s latest attempt without ever writing to the bus —
      * used when a module-setup failure already makes the vehicle read itself unsafe to send
-     * (see [runEntry]'s own doc comment on that case). */
+     * (see [runEntry]'s own doc comment on that case). Still counts as an issued attempt for
+     * [lastIssuedAtMs]/[minGlobalIntervalMs] — a connection that cannot actually write (a BLE
+     * link stall, a resync it cannot complete) would otherwise let every entry and the whole
+     * [oneShotQueue] fail this way back to back, at CPU speed rather than the plan's own read
+     * rate, burning the queue's entire backlog before the connection has had any real chance to
+     * recover. */
     private fun recordFailure(entry: Entry, transport: ObdTransportStatusMessage) {
         val nowEpochMs = System.currentTimeMillis()
         val monotonicElapsedNs = SystemClock.elapsedRealtimeNanos() - monotonicBaseNs
+        lastIssuedAtMs = clock.now()
         latestExchanges[entry.step.signalId] = ObdSignalExchangeMessage(
             signalId = entry.step.signalId,
             transport = transport,
@@ -431,7 +458,7 @@ class CxPoller(
         val requestedAtEpochMs = System.currentTimeMillis()
         val startNanos = SystemClock.elapsedRealtimeNanos()
         lastIssuedAtMs = clock.now()
-        session.execute(step.command, deadlineMs) { result ->
+        session.execute(step.command, readDeadlineMsFor(step.moduleId)) { result ->
             if (stopped) return@execute
             val receivedAtEpochMs = System.currentTimeMillis()
             val nowNanos = SystemClock.elapsedRealtimeNanos()
@@ -469,10 +496,12 @@ class CxPoller(
 
     /** [runOneShot]'s counterpart to [recordFailure] — a one-shot step's module-setup failure,
      * reported the same way: no write to the bus, no `nextDueAtMs` bookkeeping (there is none
-     * for a one-shot step), the step is simply gone either way. */
+     * for a one-shot step), the step is simply gone either way. Paced the same way too — see
+     * [recordFailure]'s own doc comment on why this still updates [lastIssuedAtMs]. */
     private fun reportOneShotFailure(step: ObdStepMessage, transport: ObdTransportStatusMessage) {
         val nowEpochMs = System.currentTimeMillis()
         val monotonicElapsedNs = SystemClock.elapsedRealtimeNanos() - monotonicBaseNs
+        lastIssuedAtMs = clock.now()
         sink?.invoke(
             CxPollExchange(
                 signalId = step.signalId,

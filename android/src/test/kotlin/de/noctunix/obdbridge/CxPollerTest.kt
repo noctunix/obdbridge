@@ -574,6 +574,138 @@ class CxPollerTest {
         assertTrue("ATSH720 must precede the step it sets up for", writes.indexOf("ATSH720") < writes.indexOf("222AD0"))
     }
 
+    /** Reproduces the field reports behind the writeFailed floods: once a module needs its setup
+     * re-run and the transport cannot actually write (a real adapter would be this unwritable
+     * for as long as a BLE link drop or a stuck GATT queue lasts), [CxPoller] must not drain the
+     * *entire* one-shot backlog as instant failures in one synchronous call — that is CPU time,
+     * not time actually spent waiting on anything, and it burns through recording time the
+     * connection could otherwise use once it is actually writable again. */
+    @Test
+    fun aPersistentWriteFailureMustNotDrainTheWholeOneShotQueueInOneSynchronousBurst() {
+        val clock = FakeClock()
+        val transport = object : CxCommandTransport {
+            override fun write(bytes: ByteArray): Boolean = false
+        }
+        val session = CxCommandSession(transport, clock)
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to moduleA),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+            sink = { exchanges.add(it) },
+        )
+        poller.start(emptyList())
+        val batch = (0 until 1000).map { oneShotStepA.copy(signalId = "s$it") }
+
+        poller.enqueueOneShot(emptyList(), batch)
+
+        assertTrue(
+            "a persistently unwritable connection must not fail the whole queue before any " +
+                "time passes to let the connection actually recover, got ${exchanges.size} of " +
+                "${batch.size} resolved at clock time ${clock.now()}",
+            exchanges.size < batch.size,
+        )
+    }
+
+    @Test
+    fun aModulesOwnReadDeadlineOverridesThePlanDefaultForASlowEcu() {
+        val clock = FakeClock()
+        val slowModule = moduleA.copy(readDeadlineMs = 8000L)
+        val transport = object : CxCommandTransport {
+            lateinit var session: CxCommandSession
+
+            override fun write(bytes: ByteArray): Boolean {
+                val command = String(bytes, Charsets.US_ASCII).removeSuffix("\r")
+                when (command) {
+                    "ATSP6" -> session.onNotification("OK\r>".toByteArray())
+                    // Answers only after the plan's own 2 s default has already elapsed, but
+                    // within this module's own 8 s override -- an ECU repeatedly extending
+                    // P2* with NRC 0x78 (responsePending), modelled here as a plain late reply.
+                    "222AB8" -> clock.schedule(5000L) {
+                        session.onNotification("622AB80005E3\r>".toByteArray())
+                    }
+                }
+                return true
+            }
+        }
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to slowModule),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+            sink = { exchanges.add(it) },
+        )
+
+        poller.start(listOf(stepA))
+        drive(clock, maxSteps = 50, until = { exchanges.isNotEmpty() })
+
+        assertEquals(1, exchanges.size)
+        assertEquals(
+            "the module's own longer deadline must let a reply later than the plan default through",
+            ObdTransportStatusMessage.OK,
+            exchanges.single().transport,
+        )
+    }
+
+    @Test
+    fun aOneShotStepReenqueuingAPlanModuleWithoutRepeatingItsReadDeadlineKeepsThePlansOwnValue() {
+        val clock = FakeClock()
+        val slowModule = moduleA.copy(readDeadlineMs = 8000L)
+        // The caller enqueueing oneShotStepA addresses "m1" again with a fresh ObdModuleMessage
+        // that never repeats readDeadlineMs -- exactly what happens when a generic caller builds
+        // one from scratch for a module it already knows the setup for, like
+        // `BridgeReadExecutor._toBridgeModule` does for every one-shot read.
+        val oneShotModuleOverride = ObdModuleMessage(moduleId = "m1", protocol = 6L, setup = listOf("ATSP6"))
+        val transport = object : CxCommandTransport {
+            lateinit var session: CxCommandSession
+
+            override fun write(bytes: ByteArray): Boolean {
+                val command = String(bytes, Charsets.US_ASCII).removeSuffix("\r")
+                when (command) {
+                    "ATSP6" -> session.onNotification("OK\r>".toByteArray())
+                    "222AC0" -> clock.schedule(5000L) {
+                        session.onNotification("622AC0FF\r>".toByteArray())
+                    }
+                }
+                return true
+            }
+        }
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        val exchanges = mutableListOf<CxPollExchange>()
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to slowModule),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+            sink = { exchanges.add(it) },
+        )
+
+        poller.start(emptyList())
+        poller.enqueueOneShot(listOf(oneShotModuleOverride), listOf(oneShotStepA))
+        drive(clock, maxSteps = 50, until = { exchanges.isNotEmpty() })
+
+        assertEquals(1, exchanges.size)
+        assertEquals(
+            "re-registering m1's setup without repeating readDeadlineMs must not lose it",
+            ObdTransportStatusMessage.OK,
+            exchanges.single().transport,
+        )
+    }
+
     @Test
     fun aOneShotStepWhoseModuleSetupFailsStillReportsExactlyOneResult() {
         val clock = FakeClock()

@@ -376,6 +376,7 @@ class ObdModuleMessage {
     required this.moduleId,
     required this.protocol,
     required this.setup,
+    this.readDeadlineMs,
   });
 
   String moduleId;
@@ -387,8 +388,16 @@ class ObdModuleMessage {
 
   List<String> setup;
 
+  /// Overrides `ObdLimitsMessage.vehicleReadDeadlineMs` for every step
+  /// addressing this module, `null` to use the plan's own deadline. For an
+  /// ECU that legitimately needs longer than the rest of the plan budgets
+  /// for — one that answers NRC 0x78 (responsePending) and keeps extending
+  /// P2* past the plan's default — rather than lengthening the deadline for
+  /// every module just to accommodate the one slow one.
+  int? readDeadlineMs;
+
   List<Object?> _toList() {
-    return <Object?>[moduleId, protocol, setup];
+    return <Object?>[moduleId, protocol, setup, readDeadlineMs];
   }
 
   Object encode() {
@@ -401,6 +410,7 @@ class ObdModuleMessage {
       moduleId: result[0]! as String,
       protocol: result[1]! as int,
       setup: (result[2]! as List<Object?>).cast<String>(),
+      readDeadlineMs: result[3] as int?,
     );
   }
 
@@ -415,7 +425,8 @@ class ObdModuleMessage {
     }
     return _deepEquals(moduleId, other.moduleId) &&
         _deepEquals(protocol, other.protocol) &&
-        _deepEquals(setup, other.setup);
+        _deepEquals(setup, other.setup) &&
+        _deepEquals(readDeadlineMs, other.readDeadlineMs);
   }
 
   @override

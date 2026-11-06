@@ -102,6 +102,7 @@ class ObdModuleMessage {
     required this.moduleId,
     required this.protocol,
     required this.setup,
+    this.readDeadlineMs,
   });
 
   String moduleId;
@@ -111,6 +112,14 @@ class ObdModuleMessage {
   /// actually run.
   int protocol;
   List<String> setup;
+
+  /// Overrides `ObdLimitsMessage.vehicleReadDeadlineMs` for every step
+  /// addressing this module, `null` to use the plan's own deadline. For an
+  /// ECU that legitimately needs longer than the rest of the plan budgets
+  /// for — one that answers NRC 0x78 (responsePending) and keeps extending
+  /// P2* past the plan's default — rather than lengthening the deadline for
+  /// every module just to accommodate the one slow one.
+  int? readDeadlineMs;
 }
 
 /// One vehicle-read step: the already-policy-checked command text plus the
