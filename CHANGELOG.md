@@ -1,3 +1,18 @@
+## 0.2.7
+
+- Fix: under `ObdConsecutiveFailuresPolicyMessage.resyncAndContinue`, a
+  connection whose link stayed nominally up but stopped actually answering
+  could resync forever — reconstructed from a real recording stuck like
+  this for over four hours, its one-shot queue backing up to no effect
+  while nothing ever escalated. Bounded now: after a handful of resync
+  cycles with no successful read in between, the recording gives up on
+  resync alone and forces the same disconnect-and-reconnect path
+  `endRecording` already uses. The queued reads still in flight at that
+  point come back `cancelled`, each forced cycle counts against
+  `ObdLimitsMessage.maxReconnectAttemptsPerGap`, and a recording under
+  this policy can now end `interrupted` with "reconnect attempts
+  exhausted", same as `endRecording` always could.
+
 ## 0.2.6
 
 - Android toolchain alignment: AGP 9.5.0, Kotlin 2.4.21, Gradle 9.8.2 (no API
