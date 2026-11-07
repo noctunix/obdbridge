@@ -72,8 +72,17 @@ class CxPoller(
      * [ObdConsecutiveFailuresPolicyMessage.endRecording] (the default) still stops this poller
      * and fires [onConsecutiveFailuresExceeded] as before; [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue]
      * instead fires it without stopping, so polling keeps running through whatever resync
-     * [CxCommandSession] already has in progress from the failures that ran the counter up. */
+     * [CxCommandSession] already has in progress from the failures that ran the counter up —
+     * unless that has now happened [maxResyncCyclesBeforeGivingUp] times in a row with no
+     * successful read in between, at which point this cycle also stops the poller, same as
+     * [ObdConsecutiveFailuresPolicyMessage.endRecording] does. */
     private val onConsecutiveFailuresPolicy: ObdConsecutiveFailuresPolicyMessage = ObdConsecutiveFailuresPolicyMessage.END_RECORDING,
+    /** Under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue], how many times in a row
+     * [maxConsecutiveFailures] is allowed to trip without an intervening successful read before
+     * this poller gives up on resync alone and stops itself exactly like
+     * [ObdConsecutiveFailuresPolicyMessage.endRecording] would — see [onFailure]. Meaningless
+     * under any other policy. [Int.MAX_VALUE] (the default) disables the bound. */
+    private val maxResyncCyclesBeforeGivingUp: Int = Int.MAX_VALUE,
     /** Stop and call [onIdleVehicleDetected] once every step has answered `NO DATA` for this
      * long — a parked vehicle whose bus went quiet, not a transport failure.
      * [Long.MAX_VALUE] (the default) disables the check. */
@@ -83,7 +92,13 @@ class CxPoller(
     private val lastQueryAtMsProvider: (() -> Long?)? = null,
     private val watchdogTimeoutMs: Long = 30_000L,
     private val onOrphaned: (() -> Unit)? = null,
-    private val onConsecutiveFailuresExceeded: (() -> Unit)? = null,
+    /** Fires once [maxConsecutiveFailures] is reached, with whether this firing also stopped
+     * this poller — always `true` under [ObdConsecutiveFailuresPolicyMessage.endRecording];
+     * under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue], `true` only once
+     * [maxResyncCyclesBeforeGivingUp] is hit. The caller's own signal for whether to escalate to
+     * a real reconnect, rather than having to read this poller's own stopped state back out
+     * separately. */
+    private val onConsecutiveFailuresExceeded: ((Boolean) -> Unit)? = null,
     private val onIdleVehicleDetected: (() -> Unit)? = null,
     private val sink: ((CxPollExchange) -> Unit)? = null,
     /** Upper bound on [oneShotQueueDepth] — [enqueueOneShot] rejects a batch outright, queuing
@@ -120,6 +135,12 @@ class CxPoller(
     private var lastIssuedAtMs: Long? = null
 
     private var consecutiveFailures = 0
+
+    /** Consecutive times the [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue] branch of
+     * [onFailure] has fired without an intervening successful read — see
+     * [maxResyncCyclesBeforeGivingUp]. Reset to `0` everywhere [consecutiveFailures] itself
+     * resets on a successful exchange. */
+    private var resyncCyclesSinceSuccess = 0
     private val moduleNoDataStreaks = mutableMapOf<String, Int>()
     private val moduleQuietUntilMs = mutableMapOf<String, Long>()
     private val noDataFlags = ConcurrentHashMap<String, Boolean>()
@@ -385,6 +406,7 @@ class CxPoller(
             if (transport == ObdTransportStatusMessage.OK) {
                 latestSuccessful[entry.step.signalId] = exchange
                 consecutiveFailures = 0
+                resyncCyclesSinceSuccess = 0
                 noDataFlags[entry.step.signalId] = (result.responseText == "NO DATA")
                 updateQuietModuleTracking(entry.step.moduleId, result.responseText == "NO DATA")
                 updateIdleVehicleTracking()
@@ -483,6 +505,7 @@ class CxPoller(
             )
             if (transport == ObdTransportStatusMessage.OK) {
                 consecutiveFailures = 0
+                resyncCyclesSinceSuccess = 0
             } else {
                 // Same reasoning as `pollStep`'s own branch: a resync this failure can trigger
                 // wipes the adapter's module selection.
@@ -551,19 +574,29 @@ class CxPoller(
      * towards [maxConsecutiveFailures] and, once over it, reports out — the connection itself is
      * left for the caller to tear down or retry, this class only notices. Under
      * [ObdConsecutiveFailuresPolicyMessage.endRecording] that also stops this poller, same as
-     * before; under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue] the counter merely
+     * before. Under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue] the counter merely
      * resets and polling keeps running — [CxCommandSession] already started its own resync off
-     * the first of these failures, long before this threshold was even reached. */
+     * the first of these failures, long before this threshold was even reached — unless that has
+     * now happened [maxResyncCyclesBeforeGivingUp] times running with no successful read in
+     * between, in which case this cycle also stops the poller before reporting out, same as
+     * [ObdConsecutiveFailuresPolicyMessage.endRecording]: resync alone has had its fair chance
+     * and a real reconnect is owed instead. */
     private fun onFailure() {
         consecutiveFailures++
         allNoDataSinceMs = null
         if (consecutiveFailures >= maxConsecutiveFailures && !stopped) {
             consecutiveFailures = 0
             if (onConsecutiveFailuresPolicy == ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE) {
-                onConsecutiveFailuresExceeded?.invoke()
+                resyncCyclesSinceSuccess++
+                val gaveUp = resyncCyclesSinceSuccess >= maxResyncCyclesBeforeGivingUp
+                if (gaveUp) {
+                    resyncCyclesSinceSuccess = 0
+                    stop()
+                }
+                onConsecutiveFailuresExceeded?.invoke(gaveUp)
             } else {
                 stop()
-                onConsecutiveFailuresExceeded?.invoke()
+                onConsecutiveFailuresExceeded?.invoke(true)
             }
         }
     }

@@ -143,8 +143,9 @@ class CxPollerTest {
         clock: FakeClock,
         maxConsecutiveFailures: Int = Int.MAX_VALUE,
         onConsecutiveFailuresPolicy: ObdConsecutiveFailuresPolicyMessage = ObdConsecutiveFailuresPolicyMessage.END_RECORDING,
+        maxResyncCyclesBeforeGivingUp: Int = Int.MAX_VALUE,
         idleVehicleStopAfterMs: Long = Long.MAX_VALUE,
-        onConsecutiveFailuresExceeded: (() -> Unit)? = null,
+        onConsecutiveFailuresExceeded: ((Boolean) -> Unit)? = null,
         onIdleVehicleDetected: (() -> Unit)? = null,
         sink: ((CxPollExchange) -> Unit)? = null,
         oneShotQueueCapacity: Int = CxPoller.DEFAULT_ONE_SHOT_QUEUE_CAPACITY,
@@ -163,6 +164,7 @@ class CxPollerTest {
             monotonicBaseNs = 0L,
             maxConsecutiveFailures = maxConsecutiveFailures,
             onConsecutiveFailuresPolicy = onConsecutiveFailuresPolicy,
+            maxResyncCyclesBeforeGivingUp = maxResyncCyclesBeforeGivingUp,
             idleVehicleStopAfterMs = idleVehicleStopAfterMs,
             onConsecutiveFailuresExceeded = onConsecutiveFailuresExceeded,
             onIdleVehicleDetected = onIdleVehicleDetected,
@@ -243,7 +245,7 @@ class CxPollerTest {
             responses,
             clock,
             maxConsecutiveFailures = 2,
-            onConsecutiveFailuresExceeded = { exceededCalls++ },
+            onConsecutiveFailuresExceeded = { _ -> exceededCalls++ },
         )
 
         poller.start(listOf(stepA))
@@ -288,7 +290,7 @@ class CxPollerTest {
             maxReadsPerSecond = 10,
             monotonicBaseNs = 0L,
             maxConsecutiveFailures = 2,
-            onConsecutiveFailuresExceeded = { exceededCalls++ },
+            onConsecutiveFailuresExceeded = { _ -> exceededCalls++ },
         )
 
         poller.start(listOf(stepA))
@@ -312,7 +314,7 @@ class CxPollerTest {
             clock,
             maxConsecutiveFailures = 2,
             onConsecutiveFailuresPolicy = ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE,
-            onConsecutiveFailuresExceeded = { exceededCalls++ },
+            onConsecutiveFailuresExceeded = { _ -> exceededCalls++ },
         )
 
         poller.start(listOf(stepA))
@@ -322,6 +324,108 @@ class CxPollerTest {
         // A stopped poller rejects every further enqueueOneShot call outright (see
         // `enqueueOneShot`'s own `stopped ||` check) — accepted here is this test's proof that
         // resyncAndContinue never called `stop()` for hitting the budget.
+        assertEquals(
+            ObdOneShotEnqueueResultMessage.ACCEPTED,
+            poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),
+        )
+    }
+
+    @Test
+    fun resyncAndContinueGivesUpAndStopsAfterTheConfiguredNumberOfCycles() {
+        val clock = FakeClock()
+        // No resync sequence is configured here, so after the very first vehicle-read timeout
+        // `CxCommandSession` stays permanently blocked: every later "failure" is actually a
+        // queued command (module setup, then the read) timing out on its own queue deadline,
+        // never reaching the transport again — this test is only about the poller's own
+        // give-up-after-N-cycles counting, not `CxCommandSession`'s resync mechanics (see
+        // `consecutiveFailuresAcrossPollsStopThePollerAndFireTheCallbackExactlyOnce`'s own
+        // comment on the same point).
+        val responses = mutableMapOf<String, String?>("ATSP6" to "OK", "222AB8" to null)
+        var exceededCalls = 0
+        var lastFiringStoppedThePoller = false
+        val poller = buildPoller(
+            responses,
+            clock,
+            maxConsecutiveFailures = 2,
+            onConsecutiveFailuresPolicy = ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE,
+            maxResyncCyclesBeforeGivingUp = 2,
+            onConsecutiveFailuresExceeded = { stopped ->
+                exceededCalls++
+                lastFiringStoppedThePoller = stopped
+            },
+        )
+
+        poller.start(listOf(stepA))
+        drive(clock, maxSteps = 200, until = { lastFiringStoppedThePoller })
+
+        assertTrue("the give-up cycle must report that it stopped the poller", lastFiringStoppedThePoller)
+        assertEquals("the callback fires once per cycle, including the give-up cycle", 2, exceededCalls)
+        // A stopped poller rejects every further enqueueOneShot call outright (see
+        // `enqueueOneShot`'s own `stopped ||` check) — confirms the poller is actually stopped,
+        // not just that the callback claimed so.
+        assertEquals(
+            ObdOneShotEnqueueResultMessage.QUEUE_FULL,
+            poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),
+        )
+    }
+
+    @Test
+    fun aSuccessfulReadBetweenResyncCyclesResetsTheGiveUpCounterToo() {
+        val clock = FakeClock()
+        // Two failures (hits the threshold once), one success, then two more failures (hits it
+        // a second time) — with only one hit ever following a success, the give-up bound of 2
+        // must never be reached, proving the streak actually resets rather than merely slowing
+        // its climb.
+        var attempt = 0
+        val transport = ScriptedTransport { command ->
+            when (command) {
+                "ATSP6" -> "OK"
+                // A timed-out vehicle read leaves `CxCommandSession` permanently blocked until a
+                // resync actually completes (its own documented behavior) — configured so the
+                // session can ever dispatch a second real attempt at all, not because this test
+                // cares about resync content itself.
+                "ATZ" -> "OK"
+                "222AB8" -> {
+                    attempt++
+                    if (attempt == 3) "OK" else null
+                }
+                else -> null
+            }
+        }
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        session.configureResync(listOf(CxResyncStep("ATZ") { true }), 2000L)
+        var exceededCalls = 0
+        var lastFiringStoppedThePoller = false
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = mapOf("m1" to moduleA),
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+            maxConsecutiveFailures = 2,
+            onConsecutiveFailuresPolicy = ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE,
+            maxResyncCyclesBeforeGivingUp = 2,
+            onConsecutiveFailuresExceeded = { stopped ->
+                exceededCalls++
+                lastFiringStoppedThePoller = stopped
+            },
+        )
+
+        poller.start(listOf(stepA))
+        drive(clock, maxSteps = 200, until = { exceededCalls >= 2 })
+
+        assertEquals("both threshold hits must still fire", 2, exceededCalls)
+        assertTrue("a success must actually have run between the two hits", attempt >= 5)
+        assertFalse(
+            "a success between the two hits must reset the give-up streak",
+            lastFiringStoppedThePoller,
+        )
+        // A stopped poller rejects every further enqueueOneShot call outright — accepted here
+        // is this test's own proof that the poller is genuinely still running, not just that the
+        // callback's own argument claimed so.
         assertEquals(
             ObdOneShotEnqueueResultMessage.ACCEPTED,
             poller.enqueueOneShot(emptyList(), listOf(oneShotStepA)),

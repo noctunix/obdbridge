@@ -264,9 +264,10 @@ class CxRecordingService : Service() {
             monotonicBaseNs = timebase.second,
             maxConsecutiveFailures = plan.limits.maxConsecutiveTimeouts.toInt(),
             onConsecutiveFailuresPolicy = plan.limits.onConsecutiveFailures,
+            maxResyncCyclesBeforeGivingUp = MAX_RESYNC_CYCLES_BEFORE_GIVING_UP,
             idleVehicleStopAfterMs = plan.limits.idleVehicleStopAfterMs,
             quietModuleBackoffMs = plan.limits.quietModuleBackoffMs,
-            onConsecutiveFailuresExceeded = { onConsecutiveFailuresExceeded(obd) },
+            onConsecutiveFailuresExceeded = { stopped -> onConsecutiveFailuresExceeded(obd, stopped) },
             onIdleVehicleDetected = { endRecordingInternal(CxRecordingPhase.STOPPED, "vehicle idle, no data on any signal") },
             sink = { exchange -> onExchange(exchange, timebase.first) },
         )
@@ -345,22 +346,29 @@ class CxRecordingService : Service() {
 
     /** The budget `ObdLimitsMessage.maxConsecutiveTimeouts` governs ran out — the connection is
      * no longer trustworthy even though [CxBleClient] may still consider it nominally connected.
-     * Under [ObdConsecutiveFailuresPolicyMessage.endRecording] (the default), starts recovery
-     * first, then drops the connection for real via [ObdApi.disconnectForRecording]: that
-     * disconnect also cascades into [onConnectionLost] through the same listener a genuine BLE
-     * drop would, which [beginOrContinueRecovery]'s own guard absorbs as a no-op rather than a
-     * second backoff chain. Under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue], the
-     * poller itself never stopped for this (see [CxPoller.onFailure]) — this only logs the gap
-     * line the caller still needs to see the budget was hit, and otherwise does nothing: the
-     * resync [CxCommandSession] already started off the underlying failures is what recovers the
-     * link, and a real drop during it still reaches [onConnectionLost] on its own. */
-    private fun onConsecutiveFailuresExceeded(obd: ObdApi) {
+     * Under [ObdConsecutiveFailuresPolicyMessage.endRecording] (the default), [pollerStopped] is
+     * always `true` (the poller always stops itself for this policy — see [CxPoller.onFailure]),
+     * so [consecutiveFailuresOutcome] always escalates: starts recovery first, then drops the
+     * connection for real via [ObdApi.disconnectForRecording]. That disconnect also cascades
+     * into [onConnectionLost] through the same listener a genuine BLE drop would, which
+     * [beginOrContinueRecovery]'s own guard absorbs as a no-op rather than a second backoff
+     * chain. Under [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue], while the poller is
+     * still running on its own ([pollerStopped] `false`) this only logs the gap line the caller
+     * still needs to see the budget was hit, and otherwise does nothing: the resync
+     * [CxCommandSession] already started off the underlying failures is what recovers the link,
+     * and a real drop during it still reaches [onConnectionLost] on its own. Once the poller has
+     * given up on its own resync-cycle bound ([pollerStopped] `true`), this escalates the same
+     * way [ObdConsecutiveFailuresPolicyMessage.endRecording] does, with its own gap reason so the
+     * buffer records which of the two actually happened. */
+    private fun onConsecutiveFailuresExceeded(obd: ObdApi, pollerStopped: Boolean) {
         if (sessionId == null) return
-        if (request?.plan?.limits?.onConsecutiveFailures == ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE) {
-            writer?.appendGap("consecutive vehicle-read failures exceeded the configured limit, resyncing")
+        val policy = request?.plan?.limits?.onConsecutiveFailures ?: ObdConsecutiveFailuresPolicyMessage.END_RECORDING
+        val outcome = consecutiveFailuresOutcome(policy, pollerStopped)
+        if (!outcome.escalate) {
+            writer?.appendGap(outcome.gapReason)
             return
         }
-        beginOrContinueRecovery(obd, "consecutive vehicle-read failures exceeded the configured limit")
+        beginOrContinueRecovery(obd, outcome.gapReason)
         obd.disconnectForRecording()
     }
 
@@ -623,6 +631,13 @@ class CxRecordingService : Service() {
         private const val ACTION_STOP = "de.noctunix.obdbridge.action.STOP_OBD_RECORDING"
         private const val WAKE_LOCK_TAG = "de.noctunix.obdbridge:recording"
 
+        /** How many [ObdConsecutiveFailuresPolicyMessage.resyncAndContinue] cycles are tried
+         * before giving up on resync alone and forcing a real reconnect — a starting value,
+         * not yet measured against a real stuck-connection dropout's actual recovery time. Applies
+         * regardless of whatever `maxConsecutiveTimeouts`/read deadline a particular plan
+         * configures, since it bounds cycles, not time. */
+        private const val MAX_RESYNC_CYCLES_BEFORE_GIVING_UP = 5
+
         /** The literal strings `ObdTransportStatusMessage`'s Dart enum uses, not a Kotlin enum
          * name — see `CxBufferWriter`'s own class doc on why the buffer must match that spelling. */
         internal fun transportWireName(transport: ObdTransportStatusMessage): String = when (transport) {
@@ -635,5 +650,37 @@ class CxRecordingService : Service() {
             ObdTransportStatusMessage.CANCELLED -> "cancelled"
             ObdTransportStatusMessage.NOT_YET_POLLED -> "notYetPolled"
         }
+
+        /** What [onConsecutiveFailuresExceeded] does with one firing of that callback, pulled
+         * out as a pure function so the policy/stopped-state decision is testable without a
+         * running service. [ConsecutiveFailuresOutcome.escalate] tells the caller whether to
+         * fall through to [beginOrContinueRecovery]/[ObdApi.disconnectForRecording] (which logs
+         * [ConsecutiveFailuresOutcome.gapReason] itself, subject to its own already-reconnecting
+         * guard) or merely log that reason directly and keep running. */
+        internal fun consecutiveFailuresOutcome(
+            policy: ObdConsecutiveFailuresPolicyMessage,
+            pollerStopped: Boolean,
+        ): ConsecutiveFailuresOutcome = when {
+            policy == ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE && !pollerStopped ->
+                ConsecutiveFailuresOutcome(
+                    "consecutive vehicle-read failures exceeded the configured limit, resyncing",
+                    escalate = false,
+                )
+            policy == ObdConsecutiveFailuresPolicyMessage.RESYNC_AND_CONTINUE ->
+                ConsecutiveFailuresOutcome(
+                    "consecutive vehicle-read failures exceeded the configured limit, resync alone " +
+                        "never recovered the connection, forcing a reconnect",
+                    escalate = true,
+                )
+            else ->
+                ConsecutiveFailuresOutcome(
+                    "consecutive vehicle-read failures exceeded the configured limit",
+                    escalate = true,
+                )
+        }
     }
 }
+
+/** [CxRecordingService.consecutiveFailuresOutcome]'s result: [gapReason] is what gets logged;
+ * [escalate] tells the caller whether to also force a disconnect-and-reconnect. */
+internal data class ConsecutiveFailuresOutcome(val gapReason: String, val escalate: Boolean)
