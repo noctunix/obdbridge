@@ -269,8 +269,14 @@ enum class ObdConsecutiveFailuresPolicyMessage(val raw: Int) {
   /**
    * Lets the command session's own resync sequence (already triggered by the failures that
    * ran the counter up) keep running and the poller keep polling, instead of ending the
-   * recording outright. If the link actually drops during that resync, the existing
-   * reconnect path still takes over — this only changes what happens while it has not.
+   * recording outright — but only for a bounded number of these cycles with no successful
+   * read in between (the Android implementation fixes this bound internally; it is not a
+   * field of this plan). Once that bound is exhausted, the recording forces the exact same
+   * disconnect-and-reconnect path [endRecording] always takes, with the same consequences:
+   * any one-shot reads still queued at that point come back `cancelled`, each forced cycle
+   * counts against [ObdLimitsMessage.maxReconnectAttemptsPerGap] (that budget only resets on
+   * an actual successful read), and the recording can end as `INTERRUPTED` with "reconnect
+   * attempts exhausted" under this policy too, something that could never happen before.
    */
   RESYNC_AND_CONTINUE(1);
 
