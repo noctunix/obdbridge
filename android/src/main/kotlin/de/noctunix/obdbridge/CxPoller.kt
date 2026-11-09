@@ -47,9 +47,9 @@ data class CxPollExchange(
  *
  * [enqueueOneShot] additionally lets a caller append plan-shaped, read-once work
  * ([ObdApi.enqueueOneShot] only ever calls this for a recording's poller, never the live view's)
- * that [scheduleNext] interleaves into whatever idle time appears between two due recurring
- * steps, at most one queued step per idle gap so a recurring step is never delayed by more than
- * one step's own duration.
+ * that [scheduleNext] runs in any idle time and, while recurring steps keep the bus busy,
+ * alternately with them — one queued step at a time, so a recurring step is never delayed by
+ * more than one step's own duration.
  */
 class CxPoller(
     private val session: CxCommandSession,
@@ -156,6 +156,10 @@ class CxPoller(
      * every such enqueue would add another parallel chain that can also switch the adapter's
      * module between another chain's setup and its read. */
     private var pollInFlight = false
+
+    /** Whether the last read [scheduleNext] started was a recurring one — while one-shot steps are
+     * queued, the next read is then one of them even if a recurring step is due. */
+    private var lastRunWasRecurring = false
     private var entries: List<Entry> = emptyList()
     private var activeModuleId: String? = null
     private var scheduledTask: CxScheduledTask? = null
@@ -174,9 +178,19 @@ class CxPoller(
      * [ObdRecordingStateMessage.oneShotQueueDepth]. */
     val oneShotQueueDepth: Int get() = oneShotQueue.size
 
+    /** Begins polling [steps]. Steps sharing one interval start spread evenly across it rather
+     * than all at once: a plan with many long-interval steps would otherwise open every
+     * connection with one read of each of them back to back. A step whose interval it shares
+     * with no other is due immediately. */
     fun start(steps: List<ObdStepMessage>) {
         val now = clock.now()
-        entries = steps.map { Entry(it, now) }
+        val groupSizes = steps.groupingBy { it.intervalMs }.eachCount()
+        val groupIndex = mutableMapOf<Long, Int>()
+        entries = steps.map { step ->
+            val index = groupIndex[step.intervalMs] ?: 0
+            groupIndex[step.intervalMs] = index + 1
+            Entry(step, now + step.intervalMs * index / groupSizes.getValue(step.intervalMs))
+        }
         scheduleNext()
     }
 
@@ -223,8 +237,8 @@ class CxPoller(
     }
 
     /** The one scheduling decision this whole class makes: whether to run a due recurring entry,
-     * spend idle time on a queued one-shot step, or merely arm a wake-up for whichever of those
-     * becomes possible first. Always recomputed from scratch rather than trusting whatever an
+     * a queued one-shot step, or merely arm a wake-up for whichever of those becomes possible
+     * first. Always recomputed from scratch rather than trusting whatever an
      * earlier call decided — the only way [enqueueOneShot] can make freshly queued work run in
      * an idle gap that was already being waited out, and the only way a recurring step that
      * becomes due while a one-shot is running gets picked up the instant that one-shot's own
@@ -239,7 +253,12 @@ class CxPoller(
      * them in release order would hold every short-interval step back for a whole round of them.
      * Longer-interval steps only get the read budget the shorter ones leave over, so they are
      * delayed indefinitely if shorter-interval steps alone saturate it; a plan's short-interval
-     * load must stay well below the budget. */
+     * load must stay well below the budget.
+     *
+     * A queued one-shot step runs whenever no recurring entry is due, and otherwise after every
+     * recurring read: a plan that keeps the bus busy (a long-interval backlog right after a
+     * reconnect) would otherwise hold every queued step back until it drains, long past any
+     * deadline the caller is waiting with. */
     private fun scheduleNext() {
         if (stopped || pollInFlight) return
         val earliestAllowedMs = lastIssuedAtMs?.let { it + minGlobalIntervalMs } ?: 0L
@@ -252,20 +271,20 @@ class CxPoller(
         val next = entries
             .filter { dueAtMs(it) <= now }
             .minWithOrNull(compareBy({ it.step.intervalMs }, { it.nextDueAtMs + it.step.intervalMs }, { it.lastRunAtMs }))
+        if (oneShotQueue.isNotEmpty() && now >= earliestAllowedMs && (next == null || lastRunWasRecurring)) {
+            // Exactly one, then the next `scheduleNext()` call (from that step's own completion
+            // callback) re-checks for a due recurring step rather than draining the whole queue.
+            scheduledTask = null
+            pollInFlight = true
+            lastRunWasRecurring = false
+            runOneShot(oneShotQueue.removeFirst())
+            return
+        }
         if (next != null) {
             scheduledTask = null
             pollInFlight = true
+            lastRunWasRecurring = true
             runEntry(next)
-            return
-        }
-        if (oneShotQueue.isNotEmpty() && now >= earliestAllowedMs) {
-            // Idle time before the next due recurring step (or no recurring step at all) —
-            // spend exactly one of it on a queued one-shot, then let the next `scheduleNext()`
-            // call (from that step's own completion callback) re-check whether a recurring step
-            // has since become due, rather than draining the whole queue in one go.
-            scheduledTask = null
-            pollInFlight = true
-            runOneShot(oneShotQueue.removeFirst())
             return
         }
         val wakeAtMs = listOfNotNull(

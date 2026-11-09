@@ -290,7 +290,8 @@ class ObdApiTest {
             ),
             steps = listOf(
                 step("hvEnergyContent", "m1", "222AB8", "77A"),
-                step("odometerKm", "m2", "22F4A6", "18DAF106"),
+                // Its own interval, so the poller does not stagger it behind the first step.
+                step("odometerKm", "m2", "22F4A6", "18DAF106", intervalMs = 2000),
             ),
             limits = limits(),
         )

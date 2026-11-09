@@ -103,9 +103,9 @@ Android only; there is no iOS implementation yet.
 `ObdBridge.enqueueOneShot(modules, steps)` appends plan-shaped, read-once
 work to the recording that is currently running. Each step in `steps` is
 read exactly once — its `intervalMs` is ignored — using the given or
-already-planned module's setup from `modules`, interleaved into the
-poller's idle time between due recurring steps so the recording's own
-steps keep their timing. Every command `modules`' setup and `steps` carry
+already-planned module's setup from `modules`. A queued step runs in any
+idle time and, while recurring steps keep the bus busy, alternately with
+them, so a recurring step is delayed by at most one one-shot read. Every command `modules`' setup and `steps` carry
 is checked against the caller's `CommandPolicy` and `HardGuard` first,
 exactly like a plan's own commands; a rejected command throws
 `ObdBridgeCommandRejectedException` without calling native at all.

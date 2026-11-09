@@ -174,9 +174,14 @@ class CxPollerTest {
         )
     }
 
-    /** Runs [steps] over a [DelayedTransport] taking 100 ms per read until [untilMs] and returns
-     * every completed read as its signal id and completion time. */
-    private fun readsOverDelayedTransport(steps: List<ObdStepMessage>, untilMs: Long): List<Pair<String, Long>> {
+    /** Runs [steps] over a [DelayedTransport] taking 100 ms per read until [untilMs], with
+     * [oneShots] enqueued right after start, and returns every completed read as its signal id
+     * and completion time. */
+    private fun readsOverDelayedTransport(
+        steps: List<ObdStepMessage>,
+        untilMs: Long,
+        oneShots: List<ObdStepMessage> = emptyList(),
+    ): List<Pair<String, Long>> {
         val clock = FakeClock()
         val transport = DelayedTransport(clock, readDurationMs = 100L)
         val session = CxCommandSession(transport, clock)
@@ -193,6 +198,7 @@ class CxPollerTest {
             sink = { reads.add(it.signalId to clock.now()) },
         )
         poller.start(steps)
+        if (oneShots.isNotEmpty()) poller.enqueueOneShot(emptyList(), oneShots)
         drive(clock, maxSteps = 10_000, until = { clock.now() >= untilMs })
         poller.stop()
         return reads
@@ -515,8 +521,9 @@ class CxPollerTest {
         drive(clock, maxSteps = 200, until = { readAt.size >= 8 })
 
         // With only two steps, both answering NO DATA once already makes the module quiet; from
-        // then on a single probe per backoff instead of both steps every second.
-        assertEquals(listOf(0L, 100L, 60_100L, 120_100L, 180_100L, 240_100L, 300_100L, 360_100L), readAt)
+        // then on a single probe per backoff instead of both steps every second. stepB starts half
+        // an interval after stepA, the two sharing one interval.
+        assertEquals(listOf(0L, 500L, 60_500L, 120_500L, 180_500L, 240_500L, 300_500L, 360_500L), readAt)
     }
 
     @Test
@@ -898,14 +905,44 @@ class CxPollerTest {
 
     @Test
     fun aShortIntervalStepKeepsItsCadenceWhileManyLongIntervalStepsAreDueAtStart() {
-        // stepA (1 s) listed after 50 steps at 60 s, all due at start: 5 s of reads ahead of it.
-        val reads = readsOverDelayedTransport(longIntervalSteps(50, intervalMs = 60_000L) + stepA, untilMs = 20_000L)
+        // stepA (1 s) listed after 50 steps at 60 s.
+        val reads = readsOverDelayedTransport(longIntervalSteps(50, intervalMs = 60_000L) + stepA, untilMs = 60_000L)
         val shortReads = reads.filter { it.first == "sigA" }.map { it.second }
         val gaps = shortReads.zipWithNext { a, b -> b - a }
 
         assertTrue("the short step must not wait for every long step, first read at ${shortReads.first()}", shortReads.first() <= 200L)
         assertTrue("the short step must keep its 1 s cadence, got gaps $gaps", gaps.all { it <= 1200L })
         assertEquals("every long step is still read once", 50, reads.count { it.first.startsWith("long") })
+    }
+
+    @Test
+    fun stepsSharingAnIntervalStartSpreadAcrossItInsteadOfAllAtOnce() {
+        val reads = readsOverDelayedTransport(longIntervalSteps(4, intervalMs = 4_000L), untilMs = 3_900L)
+
+        assertEquals(
+            listOf("long0" to 100L, "long1" to 1_100L, "long2" to 2_100L, "long3" to 3_100L),
+            reads,
+        )
+    }
+
+    @Test
+    fun queuedOneShotsAlternateWithRecurringReadsThatKeepTheBusBusy() {
+        // 50 long steps x 100 ms = 5 s of reads per 4 s interval: the bus never idles.
+        val oneShots = (0 until 10).map { oneShotStepA.copy(signalId = "oneShot$it", command = "22%04X".format(0x3000 + it)) }
+        val reads = readsOverDelayedTransport(
+            longIntervalSteps(50, intervalMs = 4_000L) + stepA,
+            untilMs = 30_000L,
+            oneShots = oneShots,
+        )
+        val oneShotDone = reads.filter { it.first.startsWith("oneShot") }
+        val firstTwenty = reads.take(20).map { it.first }
+
+        assertEquals(10, oneShotDone.size)
+        assertTrue(
+            "every other read is a queued one-shot while any is waiting, got $firstTwenty",
+            firstTwenty.filterIndexed { i, _ -> i % 2 == 1 }.all { it.startsWith("oneShot") },
+        )
+        assertTrue("the last one-shot finishes within 20 reads, at ${oneShotDone.last().second}", oneShotDone.last().second <= 2_100L)
     }
 
     @Test
