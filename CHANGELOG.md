@@ -1,3 +1,17 @@
+## 0.2.8
+
+- One-shot reads no longer wait for idle time only. While recurring steps
+  keep the bus busy, a queued one-shot step now runs after every recurring
+  read, so a recurring step is delayed by at most one one-shot read. A
+  plan with a large long-interval backlog previously held every queued
+  step back until that backlog drained — observed as about seven minutes
+  after every connect, long past any result deadline a caller waits with.
+- Recurring steps that share one `intervalMs` now start spread evenly
+  across that interval instead of all being due at once; a step whose
+  interval no other step shares is still due immediately. A plan with
+  many long-interval steps no longer opens every connection with one read
+  of each of them back to back.
+
 ## 0.2.7
 
 - Fix: under `ObdConsecutiveFailuresPolicyMessage.resyncAndContinue`, a
