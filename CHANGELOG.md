@@ -1,3 +1,14 @@
+## 0.2.9
+
+- A recording now also ends once a connection gap has lasted
+  `idleVehicleStopAfterMs` without a successful vehicle read — an adapter
+  that powered down with the parked vehicle otherwise kept the recording
+  (and its wake lock) reconnecting indefinitely when
+  `maxReconnectAttemptsPerGap` is effectively unlimited. It ends as
+  `stopped` with "vehicle unreachable, no reconnect within the idle
+  limit"; an exhausted attempts budget still ends it as `interrupted`
+  first. The gap is measured including time the device slept.
+
 ## 0.2.8
 
 - One-shot reads no longer wait for idle time only. While recurring steps
