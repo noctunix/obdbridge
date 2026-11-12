@@ -47,4 +47,28 @@ class CxRecordingServiceDecisionTest {
             outcome.gapReason,
         )
     }
+
+    @Test
+    fun aShortGapWithAttemptsLeftKeepsReconnecting() {
+        assertEquals(
+            null,
+            CxRecordingService.reconnectGiveUp(attempts = 3, maxAttempts = 100_000, gapMs = 29 * 60_000L, idleVehicleStopAfterMs = 30 * 60_000L),
+        )
+    }
+
+    @Test
+    fun aGapAsLongAsTheIdleLimitStopsTheRecordingDespiteAnUnlimitedAttemptsBudget() {
+        assertEquals(
+            ReconnectGiveUp(CxRecordingPhase.STOPPED, "vehicle unreachable, no reconnect within the idle limit"),
+            CxRecordingService.reconnectGiveUp(attempts = 40, maxAttempts = 100_000, gapMs = 30 * 60_000L, idleVehicleStopAfterMs = 30 * 60_000L),
+        )
+    }
+
+    @Test
+    fun anExhaustedAttemptsBudgetInterruptsEvenBeforeTheIdleLimit() {
+        assertEquals(
+            ReconnectGiveUp(CxRecordingPhase.INTERRUPTED, "reconnect attempts exhausted"),
+            CxRecordingService.reconnectGiveUp(attempts = 20, maxAttempts = 20, gapMs = 60_000L, idleVehicleStopAfterMs = 30 * 60_000L),
+        )
+    }
 }

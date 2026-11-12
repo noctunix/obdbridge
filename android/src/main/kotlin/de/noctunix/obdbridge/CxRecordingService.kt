@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
@@ -67,6 +68,11 @@ class CxRecordingService : Service() {
     private var request: ObdStartRecordingRequest? = null
     private var adapterHandle: String? = null
     private var reconnectAttempts = 0
+
+    /** [SystemClock.elapsedRealtime] when the current gap began, `null` while vehicle reads
+     * succeed. Elapsed rather than uptime: uptime stops while the device sleeps, which would
+     * stretch a gap spanning a night of Doze into minutes. */
+    private var gapStartedAtMs: Long? = null
 
     /** Held only when [ObdRecordingOptionsMessage.holdWakeLock] asked for it, for exactly the
      * lifetime of the recording that requested it — acquired in [beginRecording], released by
@@ -207,6 +213,7 @@ class CxRecordingService : Service() {
         phase = CxRecordingPhase.RECORDING
         writeError = null
         reconnectAttempts = 0
+        gapStartedAtMs = null
         reconnectInFlight = false
         acquireWakeLockIfRequested(startRequest.options.holdWakeLock)
 
@@ -291,6 +298,7 @@ class CxRecordingService : Service() {
             // → reset forever, since `maxReconnectAttemptsPerGap` would never accumulate across
             // cycles that each "succeed" at getting this far.
             reconnectAttempts = 0
+            gapStartedAtMs = null
         }
         bufferWriter.appendExchange(
             signalId = exchange.signalId,
@@ -338,6 +346,7 @@ class CxRecordingService : Service() {
     private fun beginOrContinueRecovery(obd: ObdApi, gapReason: String?) {
         poller?.stop()
         poller = null
+        if (gapStartedAtMs == null) gapStartedAtMs = SystemClock.elapsedRealtime()
         if (reconnectInFlight) return
         gapReason?.let { writer?.appendGap(it) }
         reconnectInFlight = true
@@ -389,8 +398,14 @@ class CxRecordingService : Service() {
             endRecordingInternal(CxRecordingPhase.INTERRUPTED, "no adapter handle to reconnect to")
             return
         }
-        if (reconnectAttempts >= plan.limits.maxReconnectAttemptsPerGap) {
-            endRecordingInternal(CxRecordingPhase.INTERRUPTED, "reconnect attempts exhausted")
+        val giveUp = reconnectGiveUp(
+            attempts = reconnectAttempts,
+            maxAttempts = plan.limits.maxReconnectAttemptsPerGap,
+            gapMs = gapStartedAtMs?.let { SystemClock.elapsedRealtime() - it } ?: 0L,
+            idleVehicleStopAfterMs = plan.limits.idleVehicleStopAfterMs,
+        )
+        if (giveUp != null) {
+            endRecordingInternal(giveUp.phase, giveUp.reason)
             return
         }
         val backoffMs = nextBackoffMs(plan)
@@ -651,6 +666,30 @@ class CxRecordingService : Service() {
             ObdTransportStatusMessage.NOT_YET_POLLED -> "notYetPolled"
         }
 
+        /** Whether [scheduleReconnect] gives up instead of trying again, pulled out as a pure
+         * function so it is testable without a running service.
+         *
+         * @param attempts reconnect attempts already made in this gap.
+         * @param maxAttempts `ObdLimitsMessage.maxReconnectAttemptsPerGap`.
+         * @param gapMs how long the gap has lasted so far, including time the device slept.
+         * @param idleVehicleStopAfterMs `ObdLimitsMessage.idleVehicleStopAfterMs`: a gap this
+         *   long without a successful vehicle read ends the recording like an idle vehicle does.
+         * @return `null` to keep reconnecting; otherwise the phase and reason to end with —
+         *   `interrupted` once the attempts budget is spent, `stopped` once the gap outlasted the
+         *   idle limit, the attempts budget taking precedence when both hold. */
+        internal fun reconnectGiveUp(
+            attempts: Int,
+            maxAttempts: Long,
+            gapMs: Long,
+            idleVehicleStopAfterMs: Long,
+        ): ReconnectGiveUp? = when {
+            attempts >= maxAttempts ->
+                ReconnectGiveUp(CxRecordingPhase.INTERRUPTED, "reconnect attempts exhausted")
+            gapMs >= idleVehicleStopAfterMs ->
+                ReconnectGiveUp(CxRecordingPhase.STOPPED, "vehicle unreachable, no reconnect within the idle limit")
+            else -> null
+        }
+
         /** What [onConsecutiveFailuresExceeded] does with one firing of that callback, pulled
          * out as a pure function so the policy/stopped-state decision is testable without a
          * running service. [ConsecutiveFailuresOutcome.escalate] tells the caller whether to
@@ -680,6 +719,9 @@ class CxRecordingService : Service() {
         }
     }
 }
+
+/** Why [CxRecordingService.reconnectGiveUp] ends a recording instead of retrying. */
+internal data class ReconnectGiveUp(val phase: CxRecordingPhase, val reason: String)
 
 /** [CxRecordingService.consecutiveFailuresOutcome]'s result: [gapReason] is what gets logged;
  * [escalate] tells the caller whether to also force a disconnect-and-reconnect. */

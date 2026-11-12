@@ -197,7 +197,9 @@ class ObdLimitsMessage {
 
   /// Stop polling and report the recording ended once every vehicle-read signal has answered
   /// `NO DATA` for this long — a parked vehicle whose bus has gone to sleep, not a transport
-  /// failure.
+  /// failure. A connection gap that lasts this long without a successful vehicle read (an
+  /// adapter that powered down with the vehicle) ends the recording the same way, as
+  /// `stopped`, regardless of [maxReconnectAttemptsPerGap].
   int idleVehicleStopAfterMs;
 
   /// Recording-only: once three recurring reads in a row on one module (or
