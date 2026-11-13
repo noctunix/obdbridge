@@ -1,3 +1,11 @@
+## 0.2.11
+
+- The guard accepts a UDS ReadDataByIdentifier request with up to three
+  distinct DIDs, the most one CAN single frame carries, and rejects it if
+  any of them is the VIN (`F190`, `F802`) or the ECU serial number
+  (`F18C`) or a DID repeats. Several DIDs per request let a caller probe
+  for unanswered DIDs with a third of the reads.
+
 ## 0.2.10
 
 - While recurring steps keep the bus busy, a recurring read is now
