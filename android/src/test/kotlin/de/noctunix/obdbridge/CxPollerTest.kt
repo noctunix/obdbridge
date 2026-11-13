@@ -175,12 +175,13 @@ class CxPollerTest {
     }
 
     /** Runs [steps] over a [DelayedTransport] taking 100 ms per read until [untilMs], with
-     * [oneShots] enqueued right after start, and returns every completed read as its signal id
-     * and completion time. */
+     * [oneShots] (and their [oneShotModules]) enqueued right after start, and returns every
+     * completed read as its signal id and completion time. */
     private fun readsOverDelayedTransport(
         steps: List<ObdStepMessage>,
         untilMs: Long,
         oneShots: List<ObdStepMessage> = emptyList(),
+        oneShotModules: List<ObdModuleMessage> = emptyList(),
     ): List<Pair<String, Long>> {
         val clock = FakeClock()
         val transport = DelayedTransport(clock, readDurationMs = 100L)
@@ -198,7 +199,7 @@ class CxPollerTest {
             sink = { reads.add(it.signalId to clock.now()) },
         )
         poller.start(steps)
-        if (oneShots.isNotEmpty()) poller.enqueueOneShot(emptyList(), oneShots)
+        if (oneShots.isNotEmpty()) poller.enqueueOneShot(oneShotModules, oneShots)
         drive(clock, maxSteps = 10_000, until = { clock.now() >= untilMs })
         poller.stop()
         return reads
@@ -925,24 +926,85 @@ class CxPollerTest {
         )
     }
 
+    /** Runs [oneShots] against a recurring plan that keeps the bus busy (50 long steps x 100 ms =
+     * 5 s of reads per 4 s interval, all on m1) and returns the first [count] reads, every
+     * recurring one collapsed to `R`. */
+    private fun busyBusReadOrder(oneShots: List<ObdStepMessage>, count: Int): List<String> =
+        readsOverDelayedTransport(
+            longIntervalSteps(50, intervalMs = 4_000L) + stepA,
+            untilMs = 30_000L,
+            oneShots = oneShots,
+            oneShotModules = listOf(moduleB),
+        ).take(count).map { if (it.first.startsWith("long") || it.first == "sigA") "R" else it.first }
+
+    private fun oneShotOn(module: ObdModuleMessage, signalId: String, did: Int) = ObdStepMessage(
+        signalId = signalId,
+        moduleId = module.moduleId,
+        command = "22%04X".format(did),
+        responseHeader = "77A",
+        intervalMs = 0L,
+    )
+
     @Test
-    fun queuedOneShotsAlternateWithRecurringReadsThatKeepTheBusBusy() {
-        // 50 long steps x 100 ms = 5 s of reads per 4 s interval: the bus never idles.
-        val oneShots = (0 until 10).map { oneShotStepA.copy(signalId = "oneShot$it", command = "22%04X".format(0x3000 + it)) }
+    fun queuedOneShotsRunInCappedRunsBetweenRecurringReadsThatKeepTheBusBusy() {
+        val oneShots = (0 until 10).map { oneShotOn(moduleA, "oneShot$it", 0x3000 + it) }
         val reads = readsOverDelayedTransport(
             longIntervalSteps(50, intervalMs = 4_000L) + stepA,
             untilMs = 30_000L,
             oneShots = oneShots,
         )
         val oneShotDone = reads.filter { it.first.startsWith("oneShot") }
-        val firstTwenty = reads.take(20).map { it.first }
+        val firstThirteen = reads.take(13).map { if (it.first.startsWith("oneShot")) "O" else "R" }
 
         assertEquals(10, oneShotDone.size)
-        assertTrue(
-            "every other read is a queued one-shot while any is waiting, got $firstTwenty",
-            firstTwenty.filterIndexed { i, _ -> i % 2 == 1 }.all { it.startsWith("oneShot") },
+        assertEquals(
+            "runs of at most ${CxPoller.MAX_ONE_SHOT_RUN} one-shots between recurring reads",
+            "R O O O O R O O O O R O O".split(" "),
+            firstThirteen,
         )
-        assertTrue("the last one-shot finishes within 20 reads, at ${oneShotDone.last().second}", oneShotDone.last().second <= 2_100L)
+        assertTrue("the last one-shot finishes within 13 reads, at ${oneShotDone.last().second}", oneShotDone.last().second <= 1_300L)
+    }
+
+    @Test
+    fun aRunOfSameModuleOneShotsStopsAtTheCapThenTheDueRecurringStepRuns() {
+        val oneShots = (0 until 6).map { oneShotOn(moduleA, "a$it", 0x3000 + it) }
+
+        assertEquals(
+            listOf("R", "a0", "a1", "a2", "a3", "R", "a4", "a5"),
+            busyBusReadOrder(oneShots, count = 8),
+        )
+    }
+
+    @Test
+    fun aOneShotRunEndsEarlyWhenTheQueueHeadSwitchesModule() {
+        val oneShots = listOf(
+            oneShotOn(moduleA, "a1", 0x3001),
+            oneShotOn(moduleA, "a2", 0x3002),
+            oneShotOn(moduleB, "b1", 0x3101),
+            oneShotOn(moduleB, "b2", 0x3102),
+            oneShotOn(moduleA, "a3", 0x3003),
+        )
+
+        assertEquals(
+            "the first one-shot after a recurring read may switch module, the run then continues on it",
+            listOf("R", "a1", "a2", "R", "b1", "b2", "R", "a3"),
+            busyBusReadOrder(oneShots, count = 8),
+        )
+    }
+
+    @Test
+    fun aOneShotRunNeverReordersTheQueueToStayOnTheActiveModule() {
+        val oneShots = listOf(
+            oneShotOn(moduleA, "a1", 0x3001),
+            oneShotOn(moduleB, "b1", 0x3101),
+            oneShotOn(moduleA, "a2", 0x3002),
+            oneShotOn(moduleA, "a3", 0x3003),
+        )
+
+        assertEquals(
+            listOf("R", "a1", "R", "b1", "R", "a2", "a3"),
+            busyBusReadOrder(oneShots, count = 7),
+        )
     }
 
     @Test

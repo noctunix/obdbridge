@@ -47,9 +47,9 @@ data class CxPollExchange(
  *
  * [enqueueOneShot] additionally lets a caller append plan-shaped, read-once work
  * ([ObdApi.enqueueOneShot] only ever calls this for a recording's poller, never the live view's)
- * that [scheduleNext] runs in any idle time and, while recurring steps keep the bus busy,
- * alternately with them — one queued step at a time, so a recurring step is never delayed by
- * more than one step's own duration.
+ * that [scheduleNext] runs in any idle time and, while recurring steps keep the bus busy, after
+ * every recurring read — a run of at most [MAX_ONE_SHOT_RUN] queued steps, so a recurring step is
+ * never delayed by more than that many one-shot reads.
  */
 class CxPoller(
     private val session: CxCommandSession,
@@ -157,9 +157,9 @@ class CxPoller(
      * module between another chain's setup and its read. */
     private var pollInFlight = false
 
-    /** Whether the last read [scheduleNext] started was a recurring one — while one-shot steps are
-     * queued, the next read is then one of them even if a recurring step is due. */
-    private var lastRunWasRecurring = false
+    /** One-shot reads [scheduleNext] has started since the last recurring read, capped at
+     * [MAX_ONE_SHOT_RUN]. Starts exhausted so a due recurring step goes first after [start]. */
+    private var oneShotsSinceRecurring = MAX_ONE_SHOT_RUN
     private var entries: List<Entry> = emptyList()
     private var activeModuleId: String? = null
     private var scheduledTask: CxScheduledTask? = null
@@ -258,7 +258,11 @@ class CxPoller(
      * A queued one-shot step runs whenever no recurring entry is due, and otherwise after every
      * recurring read: a plan that keeps the bus busy (a long-interval backlog right after a
      * reconnect) would otherwise hold every queued step back until it drains, long past any
-     * deadline the caller is waiting with. */
+     * deadline the caller is waiting with. That first one-shot may switch module; further queued
+     * steps follow it while the queue head addresses the module now active, up to
+     * [MAX_ONE_SHOT_RUN] one-shots since the recurring read, always in FIFO order. Recurring steps
+     * and one-shots rarely share a module, and every module switch costs one BLE round trip per
+     * setup command. */
     private fun scheduleNext() {
         if (stopped || pollInFlight) return
         val earliestAllowedMs = lastIssuedAtMs?.let { it + minGlobalIntervalMs } ?: 0L
@@ -271,19 +275,19 @@ class CxPoller(
         val next = entries
             .filter { dueAtMs(it) <= now }
             .minWithOrNull(compareBy({ it.step.intervalMs }, { it.nextDueAtMs + it.step.intervalMs }, { it.lastRunAtMs }))
-        if (oneShotQueue.isNotEmpty() && now >= earliestAllowedMs && (next == null || lastRunWasRecurring)) {
-            // Exactly one, then the next `scheduleNext()` call (from that step's own completion
-            // callback) re-checks for a due recurring step rather than draining the whole queue.
+        val head = oneShotQueue.firstOrNull()
+        val sameModuleRun = oneShotsSinceRecurring < MAX_ONE_SHOT_RUN && head?.moduleId == activeModuleId
+        if (head != null && now >= earliestAllowedMs && (next == null || oneShotsSinceRecurring == 0 || sameModuleRun)) {
             scheduledTask = null
             pollInFlight = true
-            lastRunWasRecurring = false
+            oneShotsSinceRecurring = minOf(oneShotsSinceRecurring + 1, MAX_ONE_SHOT_RUN)
             runOneShot(oneShotQueue.removeFirst())
             return
         }
         if (next != null) {
             scheduledTask = null
             pollInFlight = true
-            lastRunWasRecurring = true
+            oneShotsSinceRecurring = 0
             runEntry(next)
             return
         }
@@ -672,5 +676,8 @@ class CxPoller(
     companion object {
         const val DEFAULT_ONE_SHOT_QUEUE_CAPACITY = 4096
         const val QUIET_MODULE_NO_DATA_STREAK = 3
+
+        /** Most one-shot reads [scheduleNext] runs back to back while a recurring step is due. */
+        const val MAX_ONE_SHOT_RUN = 4
     }
 }

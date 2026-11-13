@@ -1,3 +1,16 @@
+## Unreleased
+
+- While recurring steps keep the bus busy, a recurring read is now
+  followed by up to four queued one-shot steps instead of one, as long as
+  each next queued step addresses the module the previous one left
+  active; the queue is still read strictly in order, and a recurring step
+  is delayed by at most four one-shot reads. Measured on a recording,
+  88 % of consecutive reads switched module, and a switch costs one
+  round trip per setup command: about 180 ms between two reads on
+  different modules against about 48 ms on the same module, with the
+  reads themselves taking 93-147 ms — the link was busy only 37 % of the
+  time.
+
 ## 0.2.9
 
 - A recording now also ends once a connection gap has lasted
