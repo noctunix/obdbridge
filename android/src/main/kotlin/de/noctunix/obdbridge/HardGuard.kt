@@ -49,9 +49,10 @@ interface CommandPolicy {
  *
  * Allows only a fixed allow-list of adapter `AT`/`ST` commands, OBD mode
  * 01 reads (`01` + a 2-hex-digit PID), and UDS ReadDataByIdentifier (`22`
- * + a 4-hex-digit DID) other than the VIN (`F190`, `F802`) and ECU serial
- * number (`F18C`) identifiers. Every other service, and anything that is
- * not well-formed hex, is rejected.
+ * + one to [MAX_DIDS_PER_READ] distinct 4-hex-digit DIDs, ISO 14229-1
+ * §10.2) none of which is the VIN (`F190`, `F802`) or ECU serial number
+ * (`F18C`) identifier. Every other service, and anything that is not
+ * well-formed hex, is rejected.
  *
  * The adapter allow-list is exact, not a bare `AT`/`ST` prefix check:
  * STN-chip `ST` commands can transmit arbitrary CAN frames (`STPX`) or
@@ -63,10 +64,14 @@ object HardGuard {
     private val CANONICAL = Regex("^[0-9A-Z@]+$")
     private val HEX = Regex("^[0-9A-F]+$")
 
-    // Real allowed commands are at most 6 hex characters (service + 2-byte
-    // DID); anything longer than this is rejected outright rather than
-    // falling through to a per-service length check.
-    private const val MAX_HEX_LENGTH = 10
+    // A request must fit one CAN single frame (7 data bytes): the ELM327
+    // command set cannot send a segmented request, so service + 3 DIDs is
+    // the most a read can carry.
+    private const val MAX_DIDS_PER_READ = 3
+
+    // Anything longer than the longest allowed read is rejected outright
+    // rather than falling through to a per-service length check.
+    private const val MAX_HEX_LENGTH = 2 + 4 * MAX_DIDS_PER_READ
 
     private val BLOCKED_DIDS = setOf("F190", "F802", "F18C")
 
@@ -148,14 +153,15 @@ object HardGuard {
                     GuardResult.Rejected("malformed mode 01 read")
                 }
             "22" -> {
-                if (command.length != 6) {
+                if (command.length < 6 || (command.length - 2) % 4 != 0) {
                     GuardResult.Rejected("malformed UDS ReadDataByIdentifier")
                 } else {
-                    val did = command.substring(2)
-                    if (did in BLOCKED_DIDS) {
-                        GuardResult.Rejected("blocked identifier $did")
-                    } else {
-                        GuardResult.Allowed(command)
+                    val dids = command.substring(2).chunked(4)
+                    val blocked = dids.firstOrNull { it in BLOCKED_DIDS }
+                    when {
+                        blocked != null -> GuardResult.Rejected("blocked identifier $blocked")
+                        dids.toSet().size != dids.size -> GuardResult.Rejected("repeated identifier")
+                        else -> GuardResult.Allowed(command)
                     }
                 }
             }

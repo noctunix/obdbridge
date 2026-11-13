@@ -22,7 +22,10 @@ the library additionally rejects on its own, regardless of that policy:
 - any service other than mode 01 reads, UDS ReadDataByIdentifier (`0x22`),
   and an explicit, fixed allow-list of adapter `AT`/`ST` commands,
 - the VIN DIDs `F190` and `F802`,
-- the ECU serial number `F18C`.
+- the ECU serial number `F18C`,
+
+where a ReadDataByIdentifier request may carry up to three distinct DIDs
+(one CAN single frame) and is rejected if any of them is blocked.
 
 No write, clear-DTC, routine, security-access, session-control or reset
 service can ever be reached through this library. Callers are expected to

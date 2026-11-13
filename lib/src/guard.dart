@@ -54,9 +54,10 @@ abstract class CommandPolicy {
 ///
 /// Allows only a fixed allow-list of adapter `AT`/`ST` commands, OBD mode
 /// 01 reads (`01` + a 2-hex-digit PID), and UDS ReadDataByIdentifier (`22`
-/// + a 4-hex-digit DID) other than the VIN (`F190`, `F802`) and ECU serial
-/// number (`F18C`) identifiers. Every other service, and anything that is
-/// not well-formed hex, is rejected.
+/// + one to [maxDidsPerRead] distinct 4-hex-digit DIDs, ISO 14229-1
+/// §10.2) none of which is the VIN (`F190`, `F802`) or ECU serial number
+/// (`F18C`) identifier. Every other service, and anything that is not
+/// well-formed hex, is rejected.
 ///
 /// The adapter allow-list is exact, not a bare `AT`/`ST` prefix check:
 /// STN-chip `ST` commands can transmit arbitrary CAN frames (`STPX`) or
@@ -69,10 +70,14 @@ class HardGuard {
   static final RegExp _canonical = RegExp(r'^[0-9A-Z@]+$');
   static final RegExp _hex = RegExp(r'^[0-9A-F]+$');
 
-  // Real allowed commands are at most 6 hex characters (service + 2-byte
-  // DID); anything longer than this is rejected outright rather than
-  // falling through to a per-service length check.
-  static const int _maxHexLength = 10;
+  /// The most DIDs one ReadDataByIdentifier request may carry: a request
+  /// must fit one CAN single frame (7 data bytes), since the ELM327
+  /// command set cannot send a segmented request.
+  static const int maxDidsPerRead = 3;
+
+  // Anything longer than the longest allowed read is rejected outright
+  // rather than falling through to a per-service length check.
+  static const int _maxHexLength = 2 + 4 * maxDidsPerRead;
 
   static const Set<String> _blockedDids = {'F190', 'F802', 'F18C'};
 
@@ -168,12 +173,20 @@ class HardGuard {
         }
         return const GuardRejected('malformed mode 01 read');
       case '22':
-        if (command.length != 6) {
+        if (command.length < 6 || (command.length - 2) % 4 != 0) {
           return const GuardRejected('malformed UDS ReadDataByIdentifier');
         }
-        final did = command.substring(2);
-        if (_blockedDids.contains(did)) {
-          return GuardRejected('blocked identifier $did');
+        final dids = [
+          for (var i = 2; i < command.length; i += 4)
+            command.substring(i, i + 4),
+        ];
+        for (final did in dids) {
+          if (_blockedDids.contains(did)) {
+            return GuardRejected('blocked identifier $did');
+          }
+        }
+        if (dids.toSet().length != dids.length) {
+          return const GuardRejected('repeated identifier');
         }
         return GuardAllowed(command);
       default:
