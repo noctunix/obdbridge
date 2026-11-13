@@ -10,6 +10,17 @@
   different modules against about 48 ms on the same module, with the
   reads themselves taking 93-147 ms — the link was busy only 37 % of the
   time.
+- A module switch now skips every setup command the adapter is known to
+  hold already (`ATSP`, `ATSH`, `ATCRA`, `ATFCSH`, `ATFCSD`, `ATFCSM` with
+  the identical value), so switching between two modules on the same
+  protocol sends only what differs, typically the header and receive
+  address instead of all six commands; on the same recording, a module
+  switch added about 130 ms of setup round trips to every read gap.
+  `ATCF`/`ATCM` are always sent and invalidate a known `ATCRA`; any other
+  setup command, a failed setup command,
+  a failed vehicle read, a resync and a poller start or stop forget
+  everything, so the next switch sends the whole setup again. Every sent
+  command still passes the policy and `HardGuard`.
 
 ## 0.2.9
 

@@ -28,11 +28,66 @@ data class CxPollExchange(
 )
 
 /**
+ * The module-setup commands an adapter is known to hold since its last reset, so a module switch
+ * only sends the ones that differ. Commands are compared without whitespace and case, which an
+ * ELM327 ignores. `ATSP`, `ATSH`, `ATFCSH`, `ATFCSD` and `ATFCSM` each remember the last value
+ * applied. Receive filtering is one family: `ATCRA` rewrites the same filter and mask that
+ * `ATCF`/`ATCM` set, so those two are always sent and an `ATCRA` is only known while neither was
+ * applied after it. An applied `ATSP` forgets everything else: switching protocol performs a
+ * protocol close, and the ELM327 datasheet only promises that headers survive it. Any other
+ * command (`ATD`, `ATZ`, `ATCP`, STN filter commands, ...) may reset or change addressing, so
+ * applying one forgets everything.
+ */
+private class AdapterSetupTracker {
+    private enum class Family { PROTOCOL, HEADER, RECEIVE_FILTER, FLOW_CONTROL_HEADER, FLOW_CONTROL_DATA, FLOW_CONTROL_MODE }
+
+    private val applied = mutableMapOf<Family, String>()
+
+    fun isApplied(command: String): Boolean {
+        val normalized = normalize(command)
+        val family = familyOf(normalized) ?: return false
+        return applied[family] == normalized
+    }
+
+    fun onApplied(command: String) {
+        val normalized = normalize(command)
+        when (val family = familyOf(normalized)) {
+            null -> applied.clear()
+            Family.PROTOCOL -> {
+                applied.clear()
+                applied[family] = normalized
+            }
+            Family.RECEIVE_FILTER ->
+                if (normalized.startsWith("ATCRA")) applied[family] = normalized else applied.remove(family)
+            else -> applied[family] = normalized
+        }
+    }
+
+    fun clear() = applied.clear()
+
+    private fun normalize(command: String) = command.filterNot { it.isWhitespace() }.uppercase()
+
+    private fun familyOf(command: String): Family? = when {
+        command.startsWith("ATSP") -> Family.PROTOCOL
+        command.startsWith("ATSH") -> Family.HEADER
+        command.startsWith("ATFCSH") -> Family.FLOW_CONTROL_HEADER
+        command.startsWith("ATFCSD") -> Family.FLOW_CONTROL_DATA
+        command.startsWith("ATFCSM") -> Family.FLOW_CONTROL_MODE
+        // `ATCFC0`/`ATCFC1` switch flow control on or off, they are not a filter.
+        command.startsWith("ATCFC") -> null
+        command.startsWith("ATCRA") || command.startsWith("ATCF") || command.startsWith("ATCM") -> Family.RECEIVE_FILTER
+        else -> null
+    }
+}
+
+/**
  * Repeatedly issues every step of a compiled poll plan, respecting each step's own `intervalMs`
  * and the plan's global `maxReadsPerSecond`, and re-running a module's setup via [modules]
  * whenever the step about to run addresses a different module than the last one actually
  * written — an ELM327/STN adapter has exactly one selected module at a time; nothing else here
- * ever switches it back. Exactly one poll is ever in flight at a time (a single scheduling loop,
+ * ever switches it back. A switch skips every setup command [AdapterSetupTracker] knows the
+ * adapter already holds; anything that may have reset the adapter forgets that knowledge along
+ * with the active module. Exactly one poll is ever in flight at a time (a single scheduling loop,
  * not one timer per step), which is what makes the "which module is active" bookkeeping safe
  * without its own lock. [stop] cancels the next scheduled poll and makes any later in-flight
  * result for this instance a no-op.
@@ -162,6 +217,7 @@ class CxPoller(
     private var oneShotsSinceRecurring = MAX_ONE_SHOT_RUN
     private var entries: List<Entry> = emptyList()
     private var activeModuleId: String? = null
+    private val adapterSetup = AdapterSetupTracker()
     private var scheduledTask: CxScheduledTask? = null
 
     /** Steps queued by [enqueueOneShot], read exactly once each, in FIFO order — never one timer
@@ -183,6 +239,7 @@ class CxPoller(
      * connection with one read of each of them back to back. A step whose interval it shares
      * with no other is due immediately. */
     fun start(steps: List<ObdStepMessage>) {
+        forgetAdapterState()
         val now = clock.now()
         val groupSizes = steps.groupingBy { it.intervalMs }.eachCount()
         val groupIndex = mutableMapOf<Long, Int>()
@@ -196,6 +253,7 @@ class CxPoller(
 
     fun stop() {
         stopped = true
+        forgetAdapterState()
         scheduledTask?.cancel()
         scheduledTask = null
         // A stopped poller never runs anything queued here again — see CxRecordingService's own
@@ -231,9 +289,17 @@ class CxPoller(
 
     /** Called after a resync attempt (success or failure) — a resync wipes the adapter's module
      * selection (`ATZ` resets the whole adapter), so every poller sharing this connection must
-     * forget which module it last addressed, successful resync or not. */
+     * forget which module it last addressed and which setup the adapter holds, successful resync
+     * or not. */
     fun resetActiveModule() {
+        forgetAdapterState()
+    }
+
+    /** A wrongly skipped `ATSH` would send the next read to the wrong ECU, so every path that
+     * may have left the adapter in an unknown state forgets both. */
+    private fun forgetAdapterState() {
         activeModuleId = null
+        adapterSetup.clear()
     }
 
     /** The one scheduling decision this whole class makes: whether to run a due recurring entry,
@@ -370,16 +436,20 @@ class CxPoller(
             ?: deadlineMs
 
     private fun runModuleSetup(module: ObdModuleMessage, onDone: (Boolean) -> Unit) {
-        fun runNext(index: Int) {
-            if (index >= module.setup.size) {
+        fun runNext(from: Int) {
+            val index = (from until module.setup.size).firstOrNull { !adapterSetup.isApplied(module.setup[it]) }
+            if (index == null) {
                 onDone(true)
                 return
             }
-            session.execute(module.setup[index], setupDeadlineMs) { result ->
+            val command = module.setup[index]
+            session.execute(command, setupDeadlineMs) { result ->
                 if (stopped) return@execute
                 if (result.outcome == CxCommandOutcome.OK && result.responseText == "OK") {
+                    adapterSetup.onApplied(command)
                     runNext(index + 1)
                 } else {
+                    forgetAdapterState()
                     onDone(false)
                 }
             }
@@ -442,7 +512,7 @@ class CxPoller(
                 // already-dispatched read would go out as a bare `22xxxx` under whatever the
                 // adapter resets to (`ATSP0` auto-detect, a functional broadcast header), not the
                 // physically addressed module this plan compiled.
-                activeModuleId = null
+                forgetAdapterState()
                 onFailure()
             }
             entry.nextDueAtMs = clock.now() + entry.step.intervalMs
@@ -532,7 +602,7 @@ class CxPoller(
             } else {
                 // Same reasoning as `pollStep`'s own branch: a resync this failure can trigger
                 // wipes the adapter's module selection.
-                activeModuleId = null
+                forgetAdapterState()
                 onFailure()
             }
             pollInFlight = false

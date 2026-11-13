@@ -133,6 +133,15 @@ private fun longIntervalSteps(count: Int, intervalMs: Long) = (0 until count).ma
     )
 }
 
+/** The six-command setup an app plan compiles for one module, see `buildModuleSetupCommands`. */
+private fun appModule(moduleId: String, requestHeader: String, responseHeader: String) = ObdModuleMessage(
+    moduleId = moduleId,
+    protocol = 6L,
+    setup = listOf("ATSP6", "ATSH$requestHeader", "ATCRA$responseHeader", "ATFCSH$requestHeader", "ATFCSD300000", "ATFCSM1"),
+)
+
+private fun appModuleSetup(requestHeader: String, responseHeader: String) = appModule("", requestHeader, responseHeader).setup
+
 /** Robolectric is needed because [CxPoller] calls `SystemClock.elapsedRealtimeNanos()`, whose
  * stub in `android.jar` throws "not mocked" on a plain JVM. */
 @RunWith(RobolectricTestRunner::class)
@@ -923,6 +932,147 @@ class CxPollerTest {
         assertEquals(
             listOf("long0" to 100L, "long1" to 1_100L, "long2" to 2_100L, "long3" to 3_100L),
             reads,
+        )
+    }
+
+    /** A poller over [modules] whose transport answers every adapter command `OK` (or what
+     * [overrides] says, `null` for no reply) and every read with a positive response. */
+    private fun setupTrackingPoller(
+        modules: List<ObdModuleMessage>,
+        clock: FakeClock,
+        overrides: Map<String, String?> = emptyMap(),
+        configureResync: Boolean = false,
+    ): Pair<CxPoller, ScriptedTransport> {
+        val transport = ScriptedTransport { command ->
+            when {
+                command in overrides -> overrides[command]
+                command.startsWith("AT") -> "OK"
+                else -> "62${command.drop(2)}00"
+            }
+        }
+        val session = CxCommandSession(transport, clock)
+        transport.session = session
+        if (configureResync) session.configureResync(listOf(CxResyncStep("ATZ") { true }), 2000L)
+        val poller = CxPoller(
+            session = session,
+            clock = clock,
+            modules = modules.associateBy { it.moduleId },
+            deadlineMs = 2000L,
+            setupDeadlineMs = 2000L,
+            maxReadsPerSecond = 10,
+            monotonicBaseNs = 0L,
+        )
+        return poller to transport
+    }
+
+    /** Writes from the one at [from] up to and including the next write of [read]. */
+    private fun ScriptedTransport.writesUntil(read: String, from: Int): List<String> {
+        val end = (from until writes.size).first { writes[it] == read }
+        return writes.subList(from, end + 1).toList()
+    }
+
+    @Test
+    fun aModuleSwitchThatOnlyChangesTheHeaderSendsOnlyTheDifferingCommands() {
+        val clock = FakeClock()
+        val first = appModule("p1", requestHeader = "710", responseHeader = "77A")
+        val second = appModule("p2", requestHeader = "711", responseHeader = "77A")
+        val (poller, transport) = setupTrackingPoller(listOf(first, second), clock)
+        val recurring = ObdStepMessage(signalId = "r", moduleId = "p1", command = "222AB8", responseHeader = "77A", intervalMs = 1000L)
+        val oneShot = ObdStepMessage(signalId = "o", moduleId = "p2", command = "222AC0", responseHeader = "77A", intervalMs = 0L)
+
+        poller.start(listOf(recurring))
+        assertEquals(appModuleSetup("710", "77A") + "222AB8", transport.writes)
+
+        poller.enqueueOneShot(emptyList(), listOf(oneShot))
+        var from = transport.writes.size
+        drive(clock, until = { "222AC0" in transport.writes })
+        assertEquals(listOf("ATSH711", "ATFCSH711", "222AC0"), transport.writesUntil("222AC0", from))
+
+        from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AB8") })
+        assertEquals(listOf("ATSH710", "ATFCSH710", "222AB8"), transport.writesUntil("222AB8", from))
+    }
+
+    @Test
+    fun theWholeSetupIsSentAgainAfterResetActiveModule() {
+        val clock = FakeClock()
+        val module = appModule("p1", requestHeader = "710", responseHeader = "77A")
+        val (poller, transport) = setupTrackingPoller(listOf(module), clock)
+        val recurring = ObdStepMessage(signalId = "r", moduleId = "p1", command = "222AB8", responseHeader = "77A", intervalMs = 1000L)
+
+        poller.start(listOf(recurring))
+        poller.resetActiveModule()
+        val from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AB8") })
+
+        assertEquals(appModuleSetup("710", "77A") + "222AB8", transport.writesUntil("222AB8", from))
+    }
+
+    @Test
+    fun theWholeSetupIsSentAgainAfterASetupCommandFails() {
+        val clock = FakeClock()
+        val first = appModule("p1", requestHeader = "710", responseHeader = "77A")
+        val second = appModule("p2", requestHeader = "720", responseHeader = "728")
+        val (poller, transport) = setupTrackingPoller(listOf(first, second), clock, overrides = mapOf("ATCRA728" to "?"))
+        val recurring = ObdStepMessage(signalId = "r", moduleId = "p1", command = "222AB8", responseHeader = "77A", intervalMs = 1000L)
+        val oneShot = ObdStepMessage(signalId = "o", moduleId = "p2", command = "222AC0", responseHeader = "728", intervalMs = 0L)
+
+        poller.start(listOf(recurring))
+        poller.enqueueOneShot(emptyList(), listOf(oneShot))
+        drive(clock, until = { "ATCRA728" in transport.writes })
+        val from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AB8") })
+
+        assertFalse("the one-shot read must not go out after its setup failed", "222AC0" in transport.writes)
+        assertEquals(appModuleSetup("710", "77A") + "222AB8", transport.writesUntil("222AB8", from))
+    }
+
+    @Test
+    fun theWholeSetupIsSentAgainAfterAFailedVehicleRead() {
+        val clock = FakeClock()
+        val module = appModule("p1", requestHeader = "710", responseHeader = "77A")
+        val (poller, transport) = setupTrackingPoller(listOf(module), clock, overrides = mapOf("222AB8" to null), configureResync = true)
+        val recurring = ObdStepMessage(signalId = "r", moduleId = "p1", command = "222AB8", responseHeader = "77A", intervalMs = 1000L)
+
+        poller.start(listOf(recurring))
+        drive(clock, until = { "ATZ" in transport.writes })
+        val from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AB8") })
+
+        assertEquals(appModuleSetup("710", "77A") + "222AB8", transport.writesUntil("222AB8", from))
+    }
+
+    @Test
+    fun filterAndMaskAreAlwaysSentAndInvalidateAKnownReceiveAddress() {
+        val clock = FakeClock()
+        val filtered = ObdModuleMessage(moduleId = "f", protocol = 6L, setup = listOf("ATSP6", "ATSH710", "ATCF77A", "ATCMFFF"))
+        val app = appModule("a", requestHeader = "710", responseHeader = "77A")
+        val (poller, transport) = setupTrackingPoller(listOf(filtered, app), clock)
+        val recurring = ObdStepMessage(signalId = "r", moduleId = "f", command = "222AB8", responseHeader = "77A", intervalMs = 1000L)
+        val oneShot = { id: String -> ObdStepMessage(signalId = id, moduleId = "a", command = "222AC0", responseHeader = "77A", intervalMs = 0L) }
+
+        poller.start(listOf(recurring))
+        assertEquals(listOf("ATSP6", "ATSH710", "ATCF77A", "ATCMFFF", "222AB8"), transport.writes)
+
+        poller.enqueueOneShot(emptyList(), listOf(oneShot("o1")))
+        var from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AC0") })
+        assertEquals(
+            listOf("ATCRA77A", "ATFCSH710", "ATFCSD300000", "ATFCSM1", "222AC0"),
+            transport.writesUntil("222AC0", from),
+        )
+
+        from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AB8") })
+        assertEquals(listOf("ATCF77A", "ATCMFFF", "222AB8"), transport.writesUntil("222AB8", from))
+
+        poller.enqueueOneShot(emptyList(), listOf(oneShot("o2")))
+        from = transport.writes.size
+        drive(clock, until = { transport.writes.drop(from).contains("222AC0") })
+        assertEquals(
+            "an ATCRA is sent again once ATCF/ATCM replaced its filter",
+            listOf("ATCRA77A", "222AC0"),
+            transport.writesUntil("222AC0", from),
         )
     }
 
