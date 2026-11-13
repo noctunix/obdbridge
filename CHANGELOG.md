@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.10
 
 - While recurring steps keep the bus busy, a recurring read is now
   followed by up to four queued one-shot steps instead of one, as long as
