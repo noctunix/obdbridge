@@ -323,12 +323,17 @@ class ObdRecordingNotificationMessage {
     required this.title,
     required this.body,
     required this.stopActionLabel,
+    this.connectingBody,
   });
 
   String channelName;
   String title;
   String body;
   String stopActionLabel;
+
+  /// Shown instead of [body] while a recording started by the paired
+  /// adapter appearing is still connecting to it; `null` keeps [body].
+  String? connectingBody;
 }
 
 /// Caller-supplied, platform-specific values this library has no business
@@ -345,6 +350,7 @@ class ObdBridgeConfigMessage {
     required this.smallIconResourceName,
     required this.sharedPreferencesName,
     required this.bufferFormatId,
+    this.autoStartSuppressionMinutes,
   });
 
   /// Fully qualified class name (`Class.forName`) of the `Activity` the
@@ -363,6 +369,14 @@ class ObdBridgeConfigMessage {
   /// different value (e.g. an app that moved its own recorder here) keep
   /// using theirs so previously recorded buffers still import correctly.
   String bufferFormatId;
+
+  /// After a recording native started on its own was stopped for being idle
+  /// or by the user, and its link was released, native starts no further one
+  /// until the adapter was seen leaving or this many minutes passed. Prevents
+  /// an empty recording loop next to a parked car, where the adapter
+  /// advertises again as soon as the link is released. `null` means 30;
+  /// values are clamped to 0..1440 (`0` disables the pause).
+  int? autoStartSuppressionMinutes;
 }
 
 /// Caller-chosen behaviour for one recording, independent of [ObdPlanMessage]
@@ -479,6 +493,75 @@ enum ObdOneShotEnqueueResultMessage {
   noActiveRecording,
 }
 
+/// State of the one-time pairing through the platform's companion-device
+/// mechanism and of the presence observation built on it. The adapter is
+/// only ever identified by [adapterHandle], never by its address.
+class ObdCompanionStatusMessage {
+  ObdCompanionStatusMessage({
+    required this.supported,
+    required this.presenceSupported,
+    required this.paired,
+    this.adapterHandle,
+    this.advertisedName,
+    required this.presenceObserved,
+    required this.autoRecordingArmed,
+    required this.connectGranted,
+  });
+
+  /// The platform can pair an adapter at all (Android 8.0 / API 26 and up).
+  bool supported;
+
+  /// The platform can also report the paired adapter coming into and
+  /// leaving radio range (Android 12 / API 31 and up). Below that,
+  /// pairing still lets [NativeObdApi.connect] reach the adapter without a
+  /// scan, but [presenceObserved] can never become `true`.
+  bool presenceSupported;
+  bool paired;
+
+  /// Stable across process restarts for as long as the pairing exists; the
+  /// value [NativeObdApi.connect] accepts without a prior scan.
+  String? adapterHandle;
+
+  /// Display-only name the platform recorded at pairing time.
+  String? advertisedName;
+
+  /// Presence observation was requested and the platform accepted it.
+  bool presenceObserved;
+
+  /// A request stored by [NativeObdApi.setAutoRecording] will be started
+  /// when the adapter appears.
+  bool autoRecordingArmed;
+
+  /// The permission needed to connect to the paired adapter without a scan
+  /// is granted (`BLUETOOTH_CONNECT` from API 31, nothing below).
+  /// [NativeObdApi.permissionStatus] still describes scanning and so reports
+  /// denied for a host that only ever connects to a paired adapter.
+  bool connectGranted;
+}
+
+/// One recording native started on its own (see
+/// [NativeObdApi.setAutoRecording]), kept until the host acknowledges it so
+/// the host can import the buffer even though no Dart code ran at the time.
+class ObdAutoSessionMessage {
+  ObdAutoSessionMessage({
+    required this.sessionId,
+    required this.bufferFilePath,
+    required this.startedAtEpochMs,
+    this.endedAtEpochMs,
+    this.endReason,
+  });
+
+  String sessionId;
+  String bufferFilePath;
+  int startedAtEpochMs;
+
+  /// `null` while the recording may still be running.
+  int? endedAtEpochMs;
+
+  /// Why it ended, or why it never began (e.g. the adapter was unreachable).
+  String? endReason;
+}
+
 /// Host API implemented in Kotlin (Android). Every method is total: it
 /// resolves a value, never throws across the channel. Android's
 /// implementation is `ObdApi.kt`, backed by one shared instance owning a
@@ -505,6 +588,52 @@ abstract class NativeObdApi {
   /// already granted, so the system dialog actually appears.
   @async
   ObdPermissionStatusMessage requestPermissions();
+
+  /// Pairing and presence state; a pure read.
+  ObdCompanionStatusMessage companionStatus();
+
+  /// Pairs the CX adapter once through the platform's companion-device
+  /// dialog and remembers it across process restarts. Resolves the status
+  /// after the user answered the dialog; [ObdCompanionStatusMessage.paired]
+  /// is `false` when pairing is unsupported, no `Activity` is attached,
+  /// the user declined, or nothing was found. Pairing again while already
+  /// paired replaces the previous pairing.
+  @async
+  ObdCompanionStatusMessage pairAdapter();
+
+  /// Stops presence observation, removes the platform pairing and erases
+  /// everything remembered about the adapter, including the stored
+  /// [setAutoRecording] request.
+  @async
+  ObdCompanionStatusMessage forgetAdapter();
+
+  /// Starts or stops the platform watching for the paired adapter. A no-op
+  /// without a pairing or below API 31 (see
+  /// [ObdCompanionStatusMessage.presenceSupported]).
+  ObdCompanionStatusMessage setPresenceObservation(bool enabled);
+
+  /// Stores (or, with `null`, clears) the recording native starts on its
+  /// own when the paired adapter appears and nothing is recording yet,
+  /// without a Flutter engine. [ObdStartRecordingRequest.sessionId] and
+  /// [ObdStartRecordingRequest.startedAtEpochMs] are replaced at every
+  /// start with a fresh UUIDv7 and the current time, and every
+  /// `{sessionId}` in [ObdStartRecordingRequest.bufferFilePath] with that
+  /// id, so one stored request yields a new buffer per trip. A request
+  /// whose path has no `{sessionId}` is rejected by the Dart facade.
+  ///
+  /// The request is discarded natively when the host app's version code
+  /// differs from the one it was stored under, so an app update never runs
+  /// an old plan before the host stored it again.
+  void setAutoRecording(ObdStartRecordingRequest? request);
+
+  /// Every automatically started recording not yet acknowledged, oldest
+  /// first, including ones whose start failed. Survives
+  /// [forgetAdapter]: the buffers stay on disk until acknowledged.
+  List<ObdAutoSessionMessage> pendingAutoSessions();
+
+  /// Forgets [sessionId]; a no-op for an unknown id. Call after the buffer
+  /// was imported (see [acknowledgeImported]).
+  void acknowledgeAutoSession(String sessionId);
 
   /// Scans for up to [durationMs] and resolves every adapter discovered
   /// advertising the CX UART service; adapter selection stays with the
@@ -608,4 +737,14 @@ abstract class ObdEventsApi {
   /// an event (not yet listening, a dropped Flutter engine, …) can still
   /// recover every result from the recording's buffer once imported.
   void onOneShotResult(ObdSignalExchangeMessage result);
+}
+
+/// Presence events for the paired adapter, kept apart from [ObdEventsApi]
+/// so existing implementers of that interface are unaffected.
+@FlutterApi()
+abstract class ObdPresenceEventsApi {
+  /// The paired adapter came into (`true`) or left (`false`) radio range
+  /// while a Flutter engine was attached. An adapter that is connected
+  /// stops advertising, so `false` does not mean the trip is over.
+  void onAdapterPresence(bool present);
 }

@@ -5,6 +5,10 @@ library;
 import 'guard.dart';
 import 'obdbridge_api.g.dart';
 
+/// Replaced by the new session id in the buffer path of a request stored with
+/// [ObdBridge.setAutoRecording].
+const String autoRecordingSessionIdPlaceholder = '{sessionId}';
+
 /// Thrown by [ObdBridge] when a plan carries one or more commands
 /// [GuardedCommandFilter] rejects — native is never called in that case.
 class ObdBridgeCommandRejectedException implements Exception {
@@ -110,6 +114,49 @@ class ObdBridge {
     ]);
     return _native.enqueueOneShot(modules, steps);
   }
+
+  Future<ObdCompanionStatusMessage> companionStatus() =>
+      _native.companionStatus();
+
+  /// Pairs the adapter once through the system's companion-device dialog; see
+  /// [NativeObdApi.pairAdapter].
+  Future<ObdCompanionStatusMessage> pairAdapter() => _native.pairAdapter();
+
+  Future<ObdCompanionStatusMessage> forgetAdapter() => _native.forgetAdapter();
+
+  Future<ObdCompanionStatusMessage> setPresenceObservation(bool enabled) =>
+      _native.setPresenceObservation(enabled);
+
+  /// Stores [request], which native starts without a Flutter engine whenever
+  /// the paired adapter appears; `null` clears it. Checks every command
+  /// [request.plan] carries against [policy] exactly like [startRecording]
+  /// and throws [ObdBridgeCommandRejectedException] without calling native if
+  /// any is rejected.
+  ///
+  /// Throws [ArgumentError] if [request.bufferFilePath] does not contain
+  /// `{sessionId}`: native mints a new session id per start, and a fixed path
+  /// would make every trip append to the same buffer.
+  Future<void> setAutoRecording(ObdStartRecordingRequest? request) {
+    if (request != null) {
+      _checkPlan(request.plan);
+      if (!request.bufferFilePath.contains(autoRecordingSessionIdPlaceholder)) {
+        throw ArgumentError.value(
+          request.bufferFilePath,
+          'request.bufferFilePath',
+          'must contain $autoRecordingSessionIdPlaceholder',
+        );
+      }
+    }
+    return _native.setAutoRecording(request);
+  }
+
+  /// Recordings native started on its own that the host has not acknowledged
+  /// yet, oldest first; see [NativeObdApi.pendingAutoSessions].
+  Future<List<ObdAutoSessionMessage>> pendingAutoSessions() =>
+      _native.pendingAutoSessions();
+
+  Future<void> acknowledgeAutoSession(String sessionId) =>
+      _native.acknowledgeAutoSession(sessionId);
 
   Future<void> stopRecording(String sessionId) =>
       _native.stopRecording(sessionId);

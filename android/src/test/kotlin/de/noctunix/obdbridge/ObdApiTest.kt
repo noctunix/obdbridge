@@ -667,6 +667,277 @@ class ObdApiTest {
     }
 
     @Test
+    fun aPresenceEventStartsTheStoredRequestOnceUnderAFreshSessionAndNeverStopsIt() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences(CompanionStore.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
+        val store = CompanionStore(context)
+        store.autoRecording = sampleRequest()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.onAdapterPresence(true)
+        val first = api.peekPendingRecordingRequest()
+        api.onAdapterPresence(true)
+        api.onAdapterPresence(false)
+
+        assertEquals("a second appearance must not replace the start already in flight", first, api.peekPendingRecordingRequest())
+        assertTrue(first!!.sessionId != "template-session")
+        assertEquals("/data/trips/${first.sessionId}.jsonl", first.bufferFilePath)
+    }
+
+    private fun freshStore(context: Context, version: Long = 1L): CompanionStore {
+        context.getSharedPreferences(CompanionStore.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
+        return CompanionStore(context.getSharedPreferences(CompanionStore.PREFS_NAME, Context.MODE_PRIVATE)) { version }
+    }
+
+    @Test
+    fun aPresenceStartIsListedForTheHostAndAnEndedOneSuppressesTheNextStart() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.savePairing(samplePairing())
+        store.autoRecording = sampleRequest()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.onAdapterPresence(true)
+        val started = api.peekPendingRecordingRequest()!!
+        val listed = api.pendingAutoSessions().single()
+        assertEquals(started.sessionId, listed.sessionId)
+        assertEquals(started.bufferFilePath, listed.bufferFilePath)
+        assertNull(listed.endedAtEpochMs)
+
+        api.consumePendingRecordingRequest()
+        api.onRecordingEnded(started.sessionId, "vehicle idle", AutoEndCause.IDLE_STOP, linkReleased = true)
+        api.onAdapterPresence(true)
+
+        assertNull("an appearance right after an automatic recording ended must not start another", api.peekPendingRecordingRequest())
+        assertEquals("vehicle idle", api.pendingAutoSessions().single().endReason)
+
+        api.acknowledgeAutoSession(started.sessionId)
+        assertTrue(api.pendingAutoSessions().isEmpty())
+    }
+
+    @Test
+    fun aFailedPresenceStartIsListedWithItsReasonAndDoesNotSuppress() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.autoRecording = sampleRequest()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+        api.onAdapterPresence(true)
+        val started = api.consumePendingRecordingRequest()!!
+
+        api.onAutoStartFailed(started.sessionId, "paired adapter not reachable")
+
+        assertEquals("paired adapter not reachable", api.pendingAutoSessions().single().endReason)
+        assertNull(store.autoStartSuppression)
+    }
+
+    @Test
+    fun aRecordingThatWasNotStartedByPresenceNeitherSuppressesNorIsListed() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.onRecordingEnded("manual-session", "stopped by user", AutoEndCause.USER_STOP, linkReleased = true)
+
+        assertNull(store.autoStartSuppression)
+        assertTrue(api.pendingAutoSessions().isEmpty())
+    }
+
+    @Test
+    fun releasingTheLinkOpenedByPresenceDisconnectsUnlessALiveViewAsked() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, freshStore(context))
+        awaitResult<ObdLinkStateMessage> { api.connect("handle-1", it) }
+
+        assertTrue(api.releaseLinkOpenedByPresence())
+        assertEquals(ObdLinkStateValueMessage.DISCONNECTED, api.linkState().state)
+
+        awaitResult<ObdLinkStateMessage> { api.connect("handle-1", it) }
+        awaitResult<ObdLiveStateMessage> { api.liveState(emptyList(), it) }
+        assertFalse(api.releaseLinkOpenedByPresence())
+        assertEquals(ObdLinkStateValueMessage.CONNECTED, api.linkState().state)
+    }
+
+    @Test
+    fun aMacOnlyPairingLearnsItsAssociationIdFromTheFirstMatchingEvent() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.savePairing(samplePairing(associationId = null))
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.onCompanionEvent(5, "00:11:22:33:44:55", true)
+
+        assertEquals(5, store.pairing?.associationId)
+    }
+
+    @Test
+    fun anEventForAnotherAssociationIsIgnored() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.savePairing(samplePairing(associationId = 7))
+        store.autoRecording = sampleRequest()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.onCompanionEvent(8, "AA:AA:AA:AA:AA:AA", true)
+
+        assertNull(api.peekPendingRecordingRequest())
+    }
+
+    @Test
+    fun aStoredRequestFromAnotherAppVersionIsNotStarted() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        freshStore(context, version = 1L).autoRecording = sampleRequest()
+        val updated = CompanionStore(context.getSharedPreferences(CompanionStore.PREFS_NAME, Context.MODE_PRIVATE)) { 2L }
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, updated)
+
+        api.onAdapterPresence(true)
+
+        assertNull(api.peekPendingRecordingRequest())
+    }
+
+    private fun apiWithAutoSession(
+        context: Context,
+        store: CompanionStore,
+    ): Pair<ObdApi, ObdStartRecordingRequest> {
+        store.savePairing(samplePairing())
+        store.autoRecording = sampleRequest()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+        api.onAdapterPresence(true)
+        return api to api.consumePendingRecordingRequest()!!
+    }
+
+    @Test
+    fun anIdleEndWithAReleasedLinkSuppressesButATransportErrorEndDoesNot() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        val (api, started) = apiWithAutoSession(context, store)
+
+        api.onRecordingEnded(started.sessionId, "reconnect attempts exhausted", AutoEndCause.OTHER, linkReleased = true)
+        assertNull(store.autoStartSuppression)
+
+        val (api2, started2) = apiWithAutoSession(context, store)
+        api2.onRecordingEnded(started2.sessionId, "vehicle idle", AutoEndCause.IDLE_STOP, linkReleased = true)
+        assertTrue(store.autoStartSuppression != null)
+    }
+
+    @Test
+    fun aKeptLinkOrAMissingPairingDoesNotSuppress() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        val (api, started) = apiWithAutoSession(context, store)
+
+        api.onRecordingEnded(started.sessionId, "vehicle idle", AutoEndCause.IDLE_STOP, linkReleased = false)
+        assertNull(store.autoStartSuppression)
+
+        val (api2, started2) = apiWithAutoSession(context, store)
+        store.clearPairing()
+        api2.onRecordingEnded(started2.sessionId, "vehicle idle", AutoEndCause.IDLE_STOP, linkReleased = true)
+        assertNull(store.autoStartSuppression)
+    }
+
+    @Test
+    fun aUserStopBeforeTheServiceStartedDropsTheRequestAndSuppressesButForgetOnlyDrops() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.savePairing(samplePairing())
+        store.autoRecording = sampleRequest()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.onAdapterPresence(true)
+        val first = api.peekPendingRecordingRequest()!!
+        awaitResult<ObdCompanionStatusMessage> { api.forgetAdapter(it) }
+        assertNull(api.peekPendingRecordingRequest())
+        assertEquals("stopped before the adapter connected", api.pendingAutoSessions().single().endReason)
+        assertNull(store.autoStartSuppression)
+
+        store.savePairing(samplePairing())
+        store.autoRecording = sampleRequest()
+        api.acknowledgeAutoSession(first.sessionId)
+        api.onAdapterPresence(true)
+        val second = api.peekPendingRecordingRequest()!!
+        awaitResult<Unit> { api.stopRecording(second.sessionId, it) }
+        assertNull(api.peekPendingRecordingRequest())
+        assertTrue(store.autoStartSuppression != null)
+    }
+
+    @Test
+    fun aRequestToAnAutoSessionThatIsNotPendingIsLeftAlone() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, freshStore(context))
+        awaitResult<ObdLinkStateMessage> { api.connect("handle-1", it) }
+        val manual = ObdStartRecordingRequest("manual", "v", "/tmp/x.jsonl", 0L, samplePlan(), ObdRecordingOptionsMessage(holdWakeLock = false, resumeAfterSystemKill = false))
+        awaitResult<Boolean> { api.startRecording(manual, it) }
+
+        awaitResult<ObdCompanionStatusMessage> { api.forgetAdapter(it) }
+
+        assertEquals("a manual recording's pending request is not the presence start's to drop", "manual", api.peekPendingRecordingRequest()?.sessionId)
+    }
+
+    @Test
+    fun anApi36EventWithoutAddressLearnsTheIdFromThePlatformList() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.savePairing(samplePairing(associationId = null))
+        val controller = CompanionController(
+            context,
+            store,
+            CxAdapterHandleRegistry(),
+            sdkInt = 36,
+            platformAssociations = { listOf(PlatformAssociation(11, "00:11:22:33:44:55")) },
+        )
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store, controller)
+
+        api.onCompanionEvent(11, null, true)
+
+        assertEquals(11, store.pairing?.associationId)
+    }
+
+    @Test
+    fun anEventReportedByTwoCallbackGenerationsReachesTheListenerOnce() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.savePairing(samplePairing(associationId = 7))
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+        val heard = mutableListOf<Boolean>()
+        ObdBridgePresence.listener = ObdPresenceListener { heard.add(it) }
+        try {
+            api.onCompanionEvent(7, "00:11:22:33:44:55", true)
+            api.onCompanionEvent(7, null, true)
+            api.onCompanionEvent(7, null, false)
+        } finally {
+            ObdBridgePresence.listener = null
+        }
+
+        assertEquals(listOf(true, false), heard)
+    }
+
+    @Test
+    fun configureClosesTheEntryOfAnInterruptedAutoSessionAndStaleOpenOnes() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = freshStore(context)
+        store.addAutoSession(AutoSession("interrupted", "/b/i", 1L))
+        store.addAutoSession(AutoSession("never-started", "/b/n", 2L))
+        CxRecordingRestartMarker.save(context, "obd-test-prefs", "interrupted", "/b/i", 1L)
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, store)
+
+        api.configure(ObdBridgeConfigMessage("", "", "obd-test-prefs", "fmt"))
+
+        val read = api.pendingAutoSessions().associateBy { it.sessionId }
+        assertEquals("process ended without a clean stop", read["interrupted"]?.endReason)
+        assertEquals("start did not complete", read["never-started"]?.endReason)
+    }
+
+    @Test
+    fun aPresenceEventWithoutAStoredRequestStartsNothing() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        context.getSharedPreferences(CompanionStore.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
+        val api = ObdApi(CxBleClient(ScriptedCxBleIo()), NoopCxCommandClock(), context, CompanionStore(context))
+
+        api.onAdapterPresence(true)
+
+        assertNull(api.peekPendingRecordingRequest())
+    }
+
+    @Test
     fun startLiveRefusesDuringTheWindowBetweenStartRecordingAcceptingAndThePollerActuallyInstalling() {
         val io = ScriptedCxBleIo()
         val context = ApplicationProvider.getApplicationContext<Context>()

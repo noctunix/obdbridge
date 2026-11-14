@@ -9,9 +9,11 @@ export 'src/obdbridge.dart';
 export 'src/obdbridge_api.g.dart'
     show
         ObdAdapterMessage,
+        ObdAutoSessionMessage,
         ObdBackgroundRecordingCapabilityMessage,
         ObdBridgeConfigMessage,
         ObdCapabilitiesMessage,
+        ObdCompanionStatusMessage,
         ObdConsecutiveFailuresPolicyMessage,
         ObdEventsApi,
         ObdLimitsMessage,
@@ -23,6 +25,7 @@ export 'src/obdbridge_api.g.dart'
         ObdOneShotEnqueueResultMessage,
         ObdPermissionStatusMessage,
         ObdPlanMessage,
+        ObdPresenceEventsApi,
         ObdRecordingNotificationMessage,
         ObdRecordingOptionsMessage,
         ObdRecordingStateMessage,
@@ -35,4 +38,4 @@ export 'src/obdbridge_api.g.dart'
 /// Current obdbridge package version.
 ///
 /// Kept in sync with the `version:` field in `pubspec.yaml`.
-const String obdbridgeVersion = '0.2.6';
+const String obdbridgeVersion = '0.3.0';

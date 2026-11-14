@@ -937,7 +937,12 @@ data class ObdRecordingNotificationMessage (
   val channelName: String,
   val title: String,
   val body: String,
-  val stopActionLabel: String
+  val stopActionLabel: String,
+  /**
+   * Shown instead of [body] while a recording started by the paired
+   * adapter appearing is still connecting to it; `null` keeps [body].
+   */
+  val connectingBody: String? = null
 )
  {
   companion object {
@@ -946,7 +951,8 @@ data class ObdRecordingNotificationMessage (
       val title = pigeonVar_list[1] as String
       val body = pigeonVar_list[2] as String
       val stopActionLabel = pigeonVar_list[3] as String
-      return ObdRecordingNotificationMessage(channelName, title, body, stopActionLabel)
+      val connectingBody = pigeonVar_list[4] as String?
+      return ObdRecordingNotificationMessage(channelName, title, body, stopActionLabel, connectingBody)
     }
   }
   fun toList(): List<Any?> {
@@ -955,6 +961,7 @@ data class ObdRecordingNotificationMessage (
       title,
       body,
       stopActionLabel,
+      connectingBody,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -965,7 +972,7 @@ data class ObdRecordingNotificationMessage (
       return true
     }
     val other = other as ObdRecordingNotificationMessage
-    return ObdApiPigeonUtils.deepEquals(this.channelName, other.channelName) && ObdApiPigeonUtils.deepEquals(this.title, other.title) && ObdApiPigeonUtils.deepEquals(this.body, other.body) && ObdApiPigeonUtils.deepEquals(this.stopActionLabel, other.stopActionLabel)
+    return ObdApiPigeonUtils.deepEquals(this.channelName, other.channelName) && ObdApiPigeonUtils.deepEquals(this.title, other.title) && ObdApiPigeonUtils.deepEquals(this.body, other.body) && ObdApiPigeonUtils.deepEquals(this.stopActionLabel, other.stopActionLabel) && ObdApiPigeonUtils.deepEquals(this.connectingBody, other.connectingBody)
   }
 
   override fun hashCode(): Int {
@@ -974,6 +981,7 @@ data class ObdRecordingNotificationMessage (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.title)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.body)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.stopActionLabel)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.connectingBody)
     return result
   }
 }
@@ -1009,7 +1017,16 @@ data class ObdBridgeConfigMessage (
    * different value (e.g. an app that moved its own recorder here) keep
    * using theirs so previously recorded buffers still import correctly.
    */
-  val bufferFormatId: String
+  val bufferFormatId: String,
+  /**
+   * After a recording native started on its own was stopped for being idle
+   * or by the user, and its link was released, native starts no further one
+   * until the adapter was seen leaving or this many minutes passed. Prevents
+   * an empty recording loop next to a parked car, where the adapter
+   * advertises again as soon as the link is released. `null` means 30;
+   * values are clamped to 0..1440 (`0` disables the pause).
+   */
+  val autoStartSuppressionMinutes: Long? = null
 )
  {
   companion object {
@@ -1018,7 +1035,8 @@ data class ObdBridgeConfigMessage (
       val smallIconResourceName = pigeonVar_list[1] as String
       val sharedPreferencesName = pigeonVar_list[2] as String
       val bufferFormatId = pigeonVar_list[3] as String
-      return ObdBridgeConfigMessage(activityClassName, smallIconResourceName, sharedPreferencesName, bufferFormatId)
+      val autoStartSuppressionMinutes = pigeonVar_list[4] as Long?
+      return ObdBridgeConfigMessage(activityClassName, smallIconResourceName, sharedPreferencesName, bufferFormatId, autoStartSuppressionMinutes)
     }
   }
   fun toList(): List<Any?> {
@@ -1027,6 +1045,7 @@ data class ObdBridgeConfigMessage (
       smallIconResourceName,
       sharedPreferencesName,
       bufferFormatId,
+      autoStartSuppressionMinutes,
     )
   }
   override fun equals(other: Any?): Boolean {
@@ -1037,7 +1056,7 @@ data class ObdBridgeConfigMessage (
       return true
     }
     val other = other as ObdBridgeConfigMessage
-    return ObdApiPigeonUtils.deepEquals(this.activityClassName, other.activityClassName) && ObdApiPigeonUtils.deepEquals(this.smallIconResourceName, other.smallIconResourceName) && ObdApiPigeonUtils.deepEquals(this.sharedPreferencesName, other.sharedPreferencesName) && ObdApiPigeonUtils.deepEquals(this.bufferFormatId, other.bufferFormatId)
+    return ObdApiPigeonUtils.deepEquals(this.activityClassName, other.activityClassName) && ObdApiPigeonUtils.deepEquals(this.smallIconResourceName, other.smallIconResourceName) && ObdApiPigeonUtils.deepEquals(this.sharedPreferencesName, other.sharedPreferencesName) && ObdApiPigeonUtils.deepEquals(this.bufferFormatId, other.bufferFormatId) && ObdApiPigeonUtils.deepEquals(this.autoStartSuppressionMinutes, other.autoStartSuppressionMinutes)
   }
 
   override fun hashCode(): Int {
@@ -1046,6 +1065,7 @@ data class ObdBridgeConfigMessage (
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.smallIconResourceName)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.sharedPreferencesName)
     result = 31 * result + ObdApiPigeonUtils.deepHash(this.bufferFormatId)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.autoStartSuppressionMinutes)
     return result
   }
 }
@@ -1264,6 +1284,155 @@ data class ObdRecordingStateMessage (
     return result
   }
 }
+
+/**
+ * State of the one-time pairing through the platform's companion-device
+ * mechanism and of the presence observation built on it. The adapter is
+ * only ever identified by [adapterHandle], never by its address.
+ *
+ * Generated class from Pigeon that represents data sent in messages.
+ */
+data class ObdCompanionStatusMessage (
+  /** The platform can pair an adapter at all (Android 8.0 / API 26 and up). */
+  val supported: Boolean,
+  /**
+   * The platform can also report the paired adapter coming into and
+   * leaving radio range (Android 12 / API 31 and up). Below that,
+   * pairing still lets [NativeObdApi.connect] reach the adapter without a
+   * scan, but [presenceObserved] can never become `true`.
+   */
+  val presenceSupported: Boolean,
+  val paired: Boolean,
+  /**
+   * Stable across process restarts for as long as the pairing exists; the
+   * value [NativeObdApi.connect] accepts without a prior scan.
+   */
+  val adapterHandle: String? = null,
+  /** Display-only name the platform recorded at pairing time. */
+  val advertisedName: String? = null,
+  /** Presence observation was requested and the platform accepted it. */
+  val presenceObserved: Boolean,
+  /**
+   * A request stored by [NativeObdApi.setAutoRecording] will be started
+   * when the adapter appears.
+   */
+  val autoRecordingArmed: Boolean,
+  /**
+   * The permission needed to connect to the paired adapter without a scan
+   * is granted (`BLUETOOTH_CONNECT` from API 31, nothing below).
+   * [NativeObdApi.permissionStatus] still describes scanning and so reports
+   * denied for a host that only ever connects to a paired adapter.
+   */
+  val connectGranted: Boolean
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ObdCompanionStatusMessage {
+      val supported = pigeonVar_list[0] as Boolean
+      val presenceSupported = pigeonVar_list[1] as Boolean
+      val paired = pigeonVar_list[2] as Boolean
+      val adapterHandle = pigeonVar_list[3] as String?
+      val advertisedName = pigeonVar_list[4] as String?
+      val presenceObserved = pigeonVar_list[5] as Boolean
+      val autoRecordingArmed = pigeonVar_list[6] as Boolean
+      val connectGranted = pigeonVar_list[7] as Boolean
+      return ObdCompanionStatusMessage(supported, presenceSupported, paired, adapterHandle, advertisedName, presenceObserved, autoRecordingArmed, connectGranted)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      supported,
+      presenceSupported,
+      paired,
+      adapterHandle,
+      advertisedName,
+      presenceObserved,
+      autoRecordingArmed,
+      connectGranted,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ObdCompanionStatusMessage
+    return ObdApiPigeonUtils.deepEquals(this.supported, other.supported) && ObdApiPigeonUtils.deepEquals(this.presenceSupported, other.presenceSupported) && ObdApiPigeonUtils.deepEquals(this.paired, other.paired) && ObdApiPigeonUtils.deepEquals(this.adapterHandle, other.adapterHandle) && ObdApiPigeonUtils.deepEquals(this.advertisedName, other.advertisedName) && ObdApiPigeonUtils.deepEquals(this.presenceObserved, other.presenceObserved) && ObdApiPigeonUtils.deepEquals(this.autoRecordingArmed, other.autoRecordingArmed) && ObdApiPigeonUtils.deepEquals(this.connectGranted, other.connectGranted)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.supported)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.presenceSupported)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.paired)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.adapterHandle)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.advertisedName)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.presenceObserved)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.autoRecordingArmed)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.connectGranted)
+    return result
+  }
+}
+
+/**
+ * One recording native started on its own (see
+ * [NativeObdApi.setAutoRecording]), kept until the host acknowledges it so
+ * the host can import the buffer even though no Dart code ran at the time.
+ *
+ * Generated class from Pigeon that represents data sent in messages.
+ */
+data class ObdAutoSessionMessage (
+  val sessionId: String,
+  val bufferFilePath: String,
+  val startedAtEpochMs: Long,
+  /** `null` while the recording may still be running. */
+  val endedAtEpochMs: Long? = null,
+  /** Why it ended, or why it never began (e.g. the adapter was unreachable). */
+  val endReason: String? = null
+)
+ {
+  companion object {
+    fun fromList(pigeonVar_list: List<Any?>): ObdAutoSessionMessage {
+      val sessionId = pigeonVar_list[0] as String
+      val bufferFilePath = pigeonVar_list[1] as String
+      val startedAtEpochMs = pigeonVar_list[2] as Long
+      val endedAtEpochMs = pigeonVar_list[3] as Long?
+      val endReason = pigeonVar_list[4] as String?
+      return ObdAutoSessionMessage(sessionId, bufferFilePath, startedAtEpochMs, endedAtEpochMs, endReason)
+    }
+  }
+  fun toList(): List<Any?> {
+    return listOf(
+      sessionId,
+      bufferFilePath,
+      startedAtEpochMs,
+      endedAtEpochMs,
+      endReason,
+    )
+  }
+  override fun equals(other: Any?): Boolean {
+    if (other == null || other.javaClass != javaClass) {
+      return false
+    }
+    if (this === other) {
+      return true
+    }
+    val other = other as ObdAutoSessionMessage
+    return ObdApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && ObdApiPigeonUtils.deepEquals(this.bufferFilePath, other.bufferFilePath) && ObdApiPigeonUtils.deepEquals(this.startedAtEpochMs, other.startedAtEpochMs) && ObdApiPigeonUtils.deepEquals(this.endedAtEpochMs, other.endedAtEpochMs) && ObdApiPigeonUtils.deepEquals(this.endReason, other.endReason)
+  }
+
+  override fun hashCode(): Int {
+    var result = javaClass.hashCode()
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.sessionId)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.bufferFilePath)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.startedAtEpochMs)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.endedAtEpochMs)
+    result = 31 * result + ObdApiPigeonUtils.deepHash(this.endReason)
+    return result
+  }
+}
 private open class ObdApiPigeonCodec : StandardMessageCodec() {
   override fun readValueOfType(type: Byte, buffer: ByteBuffer): Any? {
     return when (type) {
@@ -1377,6 +1546,16 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
           ObdRecordingStateMessage.fromList(it)
         }
       }
+      151.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          ObdCompanionStatusMessage.fromList(it)
+        }
+      }
+      152.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          ObdAutoSessionMessage.fromList(it)
+        }
+      }
       else -> super.readValueOfType(type, buffer)
     }
   }
@@ -1470,6 +1649,14 @@ private open class ObdApiPigeonCodec : StandardMessageCodec() {
         stream.write(150)
         writeValue(stream, value.toList())
       }
+      is ObdCompanionStatusMessage -> {
+        stream.write(151)
+        writeValue(stream, value.toList())
+      }
+      is ObdAutoSessionMessage -> {
+        stream.write(152)
+        writeValue(stream, value.toList())
+      }
       else -> super.writeValue(stream, value)
     }
   }
@@ -1502,6 +1689,55 @@ interface NativeObdApi {
    * already granted, so the system dialog actually appears.
    */
   fun requestPermissions(callback: (Result<ObdPermissionStatusMessage>) -> Unit)
+  /** Pairing and presence state; a pure read. */
+  fun companionStatus(): ObdCompanionStatusMessage
+  /**
+   * Pairs the CX adapter once through the platform's companion-device
+   * dialog and remembers it across process restarts. Resolves the status
+   * after the user answered the dialog; [ObdCompanionStatusMessage.paired]
+   * is `false` when pairing is unsupported, no `Activity` is attached,
+   * the user declined, or nothing was found. Pairing again while already
+   * paired replaces the previous pairing.
+   */
+  fun pairAdapter(callback: (Result<ObdCompanionStatusMessage>) -> Unit)
+  /**
+   * Stops presence observation, removes the platform pairing and erases
+   * everything remembered about the adapter, including the stored
+   * [setAutoRecording] request.
+   */
+  fun forgetAdapter(callback: (Result<ObdCompanionStatusMessage>) -> Unit)
+  /**
+   * Starts or stops the platform watching for the paired adapter. A no-op
+   * without a pairing or below API 31 (see
+   * [ObdCompanionStatusMessage.presenceSupported]).
+   */
+  fun setPresenceObservation(enabled: Boolean): ObdCompanionStatusMessage
+  /**
+   * Stores (or, with `null`, clears) the recording native starts on its
+   * own when the paired adapter appears and nothing is recording yet,
+   * without a Flutter engine. [ObdStartRecordingRequest.sessionId] and
+   * [ObdStartRecordingRequest.startedAtEpochMs] are replaced at every
+   * start with a fresh UUIDv7 and the current time, and every
+   * `{sessionId}` in [ObdStartRecordingRequest.bufferFilePath] with that
+   * id, so one stored request yields a new buffer per trip. A request
+   * whose path has no `{sessionId}` is rejected by the Dart facade.
+   *
+   * The request is discarded natively when the host app's version code
+   * differs from the one it was stored under, so an app update never runs
+   * an old plan before the host stored it again.
+   */
+  fun setAutoRecording(request: ObdStartRecordingRequest?)
+  /**
+   * Every automatically started recording not yet acknowledged, oldest
+   * first, including ones whose start failed. Survives
+   * [forgetAdapter]: the buffers stay on disk until acknowledged.
+   */
+  fun pendingAutoSessions(): List<ObdAutoSessionMessage>
+  /**
+   * Forgets [sessionId]; a no-op for an unknown id. Call after the buffer
+   * was imported (see [acknowledgeImported]).
+   */
+  fun acknowledgeAutoSession(sessionId: String)
   /**
    * Scans for up to [durationMs] and resolves every adapter discovered
    * advertising the CX UART service; adapter selection stays with the
@@ -1678,6 +1914,125 @@ interface NativeObdApi {
                 reply.reply(ObdApiPigeonUtils.wrapResult(data))
               }
             }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.companionStatus$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            val wrapped: List<Any?> = try {
+              listOf(api.companionStatus())
+            } catch (exception: Throwable) {
+              ObdApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.pairAdapter$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            api.pairAdapter{ result: Result<ObdCompanionStatusMessage> ->
+              val error = result.exceptionOrNull()
+              if (error != null) {
+                reply.reply(ObdApiPigeonUtils.wrapError(error))
+              } else {
+                val data = result.getOrNull()
+                reply.reply(ObdApiPigeonUtils.wrapResult(data))
+              }
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.forgetAdapter$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            api.forgetAdapter{ result: Result<ObdCompanionStatusMessage> ->
+              val error = result.exceptionOrNull()
+              if (error != null) {
+                reply.reply(ObdApiPigeonUtils.wrapError(error))
+              } else {
+                val data = result.getOrNull()
+                reply.reply(ObdApiPigeonUtils.wrapResult(data))
+              }
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.setPresenceObservation$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val enabledArg = args[0] as Boolean
+            val wrapped: List<Any?> = try {
+              listOf(api.setPresenceObservation(enabledArg))
+            } catch (exception: Throwable) {
+              ObdApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.setAutoRecording$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val requestArg = args[0] as ObdStartRecordingRequest?
+            val wrapped: List<Any?> = try {
+              api.setAutoRecording(requestArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              ObdApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.pendingAutoSessions$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            val wrapped: List<Any?> = try {
+              listOf(api.pendingAutoSessions())
+            } catch (exception: Throwable) {
+              ObdApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.obdbridge.NativeObdApi.acknowledgeAutoSession$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val sessionIdArg = args[0] as String
+            val wrapped: List<Any?> = try {
+              api.acknowledgeAutoSession(sessionIdArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              ObdApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
           }
         } else {
           channel.setMessageHandler(null)
@@ -1953,6 +2308,42 @@ class ObdEventsApi(private val binaryMessenger: BinaryMessenger, private val mes
     val channelName = "dev.flutter.pigeon.obdbridge.ObdEventsApi.onOneShotResult$separatedMessageChannelSuffix"
     val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
     channel.send(listOf(resultArg)) {
+      if (it is List<*>) {
+        if (it.size > 1) {
+          callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))
+        } else {
+          callback(Result.success(Unit))
+        }
+      } else {
+        callback(Result.failure(ObdApiPigeonUtils.createConnectionError(channelName)))
+      } 
+    }
+  }
+}
+/**
+ * Presence events for the paired adapter, kept apart from [ObdEventsApi]
+ * so existing implementers of that interface are unaffected.
+ *
+ * Generated class from Pigeon that represents Flutter messages that can be called from Kotlin.
+ */
+class ObdPresenceEventsApi(private val binaryMessenger: BinaryMessenger, private val messageChannelSuffix: String = "") {
+  companion object {
+    /** The codec used by ObdPresenceEventsApi. */
+    val codec: MessageCodec<Any?> by lazy {
+      ObdApiPigeonCodec()
+    }
+  }
+  /**
+   * The paired adapter came into (`true`) or left (`false`) radio range
+   * while a Flutter engine was attached. An adapter that is connected
+   * stops advertising, so `false` does not mean the trip is over.
+   */
+  fun onAdapterPresence(presentArg: Boolean, callback: (Result<Unit>) -> Unit)
+{
+    val separatedMessageChannelSuffix = if (messageChannelSuffix.isNotEmpty()) ".$messageChannelSuffix" else ""
+    val channelName = "dev.flutter.pigeon.obdbridge.ObdPresenceEventsApi.onAdapterPresence$separatedMessageChannelSuffix"
+    val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
+    channel.send(listOf(presentArg)) {
       if (it is List<*>) {
         if (it.size > 1) {
           callback(Result.failure(FlutterError(it[0] as String, it[1] as String, it[2] as String?)))

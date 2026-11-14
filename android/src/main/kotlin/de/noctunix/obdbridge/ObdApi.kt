@@ -2,6 +2,7 @@ package de.noctunix.obdbridge
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import java.util.UUID
@@ -27,6 +28,22 @@ private class ObdSession(val timebaseId: String) {
      * again is exactly as orphaned as one that never gets the chance to ask at all). [poller]'s
      * own watchdog uses this to notice nobody is listening any more — see its doc comment. */
     var lastLiveStateQueryAtMs: Long? = null
+}
+
+/** The collaborators the production constructor shares between the BLE layer and the pairing
+ * controller: both must see the same handle registry. */
+private class ProductionParts(val context: Context) {
+    val handles = CxAdapterHandleRegistry()
+    val io = AndroidCxBleIo(context, handles)
+    val store = CompanionStore(context)
+    val controller = CompanionController(
+        context,
+        store,
+        handles,
+        associatedAddresses = CompanionController.platformAssociatedAddresses(context),
+        platformAssociations = CompanionController.platformAssociationList(context),
+        connectGranted = io::hasConnectPermission,
+    )
 }
 
 /**
@@ -58,12 +75,20 @@ internal constructor(
      * to start [CxRecordingService], so [startRecording] simply reports failure without one
      * rather than needing a fake `Context` wired through every other test. */
     private val appContext: Context? = null,
+    /** `null` in unit tests that do not exercise pairing; the companion calls then report an
+     * unpaired, unsupported adapter. */
+    private val companionStore: CompanionStore? = null,
+    internal val companion: CompanionController? = null,
 ) : NativeObdApi {
 
-    constructor(context: Context) : this(
-        bleClient = CxBleClient(AndroidCxBleIo(context)),
+    constructor(context: Context) : this(ProductionParts(context.applicationContext))
+
+    private constructor(parts: ProductionParts) : this(
+        bleClient = CxBleClient(parts.io),
         clock = AndroidCxCommandClock(),
-        appContext = context.applicationContext,
+        appContext = parts.context,
+        companionStore = parts.store,
+        companion = parts.controller,
     )
 
     private var commandSession = buildCommandSession(CxCommandSession.DEFAULT_MAX_RESPONSE_BYTES)
@@ -103,6 +128,7 @@ internal constructor(
     }
 
     private var eventsApi: ObdEventsApi? = null
+    private var presenceEventsApi: ObdPresenceEventsApi? = null
     private var session: ObdSession? = null
 
     private var pendingConnectResolve: ((CxLinkState) -> Unit)? = null
@@ -167,13 +193,26 @@ internal constructor(
      * carries instead of the one a previous process actually wrote the marker under. */
     override fun configure(config: ObdBridgeConfigMessage) {
         this.config = config
+        companionStore?.config = config
         if (restartMarkerResolved) return
         restartMarkerResolved = true
         appContext?.let { context ->
             CxRecordingRestartMarker.resolveAbandoned(context, config.sharedPreferencesName)?.let { interrupted ->
                 lastRecordingState = interrupted
+                companionStore?.finishAutoSession(interrupted.sessionId, System.currentTimeMillis(), REASON_PROCESS_ENDED)
             }
         }
+        // An entry still open in a fresh process belongs to a start that never got as far as
+        // writing the restart marker.
+        if (recordingOwner == null && pendingRecordingRequest == null) {
+            companionStore?.finishOpenAutoSessions(System.currentTimeMillis(), REASON_START_INCOMPLETE)
+        }
+    }
+
+    /** Loads the config the last run stored, so a recording started by a presence event before
+     * any Dart code ran has real notification, activity and buffer-format values. */
+    internal fun restorePersistedConfig() {
+        companionStore?.config?.let { configure(it) }
     }
 
     /** Set once by [ObdbridgePlugin] after construction; `null` (the default) means every event
@@ -181,6 +220,10 @@ internal constructor(
      * learn the current state. */
     fun attachEventsApi(api: ObdEventsApi?) {
         eventsApi = api
+    }
+
+    fun attachPresenceEventsApi(api: ObdPresenceEventsApi?) {
+        presenceEventsApi = api
     }
 
     private fun onLinkStateChanged(state: CxLinkState) {
@@ -236,8 +279,7 @@ internal constructor(
                     backgroundRecording = ObdBackgroundRecordingCapabilityMessage.CONTINUOUS,
                     // No restart-after-kill promise exists — see CxRecordingService's class doc.
                     resumeAfterSystemKill = false,
-                    // Still-unbuilt auto-connect-on-presence.
-                    autoConnectOnPresence = false,
+                    autoConnectOnPresence = companion != null && Build.VERSION.SDK_INT >= CompanionController.MIN_PRESENCE_SDK,
                 ),
             ),
         )
@@ -519,6 +561,165 @@ internal constructor(
         CxLinkFailure.PLATFORM_ERROR -> ObdLinkFailureMessage.PLATFORM_ERROR
     }
 
+    override fun companionStatus(): ObdCompanionStatusMessage =
+        companion?.status() ?: UNSUPPORTED_COMPANION_STATUS
+
+    override fun pairAdapter(callback: (Result<ObdCompanionStatusMessage>) -> Unit) {
+        val controller = companion
+        if (controller == null) {
+            callback(Result.success(UNSUPPORTED_COMPANION_STATUS))
+            return
+        }
+        controller.pair { callback(Result.success(controller.status())) }
+    }
+
+    override fun forgetAdapter(callback: (Result<ObdCompanionStatusMessage>) -> Unit) {
+        abortPendingAutoStart(byUser = false)
+        callback(Result.success(companion?.forget() ?: UNSUPPORTED_COMPANION_STATUS))
+    }
+
+    override fun setPresenceObservation(enabled: Boolean): ObdCompanionStatusMessage =
+        companion?.setPresenceObservation(enabled) ?: UNSUPPORTED_COMPANION_STATUS
+
+    override fun setAutoRecording(request: ObdStartRecordingRequest?) {
+        companion?.setAutoRecording(request)
+    }
+
+    private val presenceHandler: CompanionPresenceHandler? by lazy {
+        companionStore?.let { store ->
+            CompanionPresenceHandler(
+                store = store,
+                recordingBusy = { recordingOwner != null || pendingRecordingRequest != null },
+                startRecording = ::startAutoRecording,
+                emitToEngine = { present -> presenceEventsApi?.onAdapterPresence(present) { } },
+                suppressionGapMs = { CompanionPresencePolicy.suppressionGapMs(config.autoStartSuppressionMinutes) },
+                hostListener = { ObdBridgePresence.listener },
+            )
+        }
+    }
+
+    override fun pendingAutoSessions(): List<ObdAutoSessionMessage> =
+        companionStore?.autoSessions().orEmpty().map {
+            ObdAutoSessionMessage(it.sessionId, it.bufferFilePath, it.startedAtEpochMs, it.endedAtEpochMs, it.endReason)
+        }
+
+    override fun acknowledgeAutoSession(sessionId: String) {
+        companionStore?.acknowledgeAutoSession(sessionId)
+    }
+
+    private val presenceDeduper = PresenceDeduper()
+
+    /** Entry for [ObdCompanionService]: one platform event, which is acted on only when it
+     * belongs to the paired adapter. A pairing made without an association id learns it here:
+     * from the event's address, or, for the API 36 event that carries none, from the platform's
+     * list of associations. */
+    internal fun onCompanionEvent(associationId: Int?, address: String?, present: Boolean) {
+        val store = companionStore ?: return
+        var pairing = store.pairing ?: return
+        if (pairing.associationId == null && address == null && associationId != null) {
+            pairing = companion?.resolveAssociationId() ?: pairing
+        }
+        if (!CompanionPresencePolicy.matches(pairing, associationId, address)) return
+        CompanionPresencePolicy.withBackfilledId(pairing, associationId, address)?.let(store::savePairing)
+        if (!presenceDeduper.accept(present, clock.now())) return
+        onAdapterPresence(present)
+    }
+
+    internal fun onAdapterPresence(present: Boolean) {
+        presenceHandler?.onPresence(present)
+    }
+
+    /** Ends a presence start that has not become a recording yet. [byUser] (stop action or
+     * `stopRecording`) also pauses further automatic starts; forgetting the adapter does not.
+     * Before the service reached `onStartCommand` there is no owner to ask, so the pending
+     * request is dropped here and the service finds nothing to start. */
+    private fun abortPendingAutoStart(byUser: Boolean) {
+        val owner = pendingStartOwner
+        if (owner != null) {
+            owner.abortAwaitingConnection(byUser)
+            return
+        }
+        val pending = peekPendingRecordingRequest() ?: return
+        if (companionStore?.isAutoSession(pending.sessionId) != true) return
+        consumePendingRecordingRequest()
+        onAutoStartFailed(pending.sessionId, REASON_STOPPED_BEFORE_CONNECT)
+        if (byUser) suppressNextAutoStart()
+    }
+
+    /** Pauses automatic starts as if a recording had just ended, unless the adapter is gone. */
+    internal fun suppressNextAutoStart() {
+        val store = companionStore ?: return
+        if (store.pairing != null) store.suppressAutoStart(System.currentTimeMillis())
+    }
+
+    /** The service currently connecting for a presence start, so Dart's stop and forget can reach it. */
+    @Volatile
+    internal var pendingStartOwner: CxRecordingService? = null
+
+    internal fun canAttemptConnect(): Boolean = bleClient.hasConnectPermission() && bleClient.isBluetoothEnabled()
+
+    /** Called when a recording whose link a presence event opened has ended: nobody else owns
+     * that link, and a connected adapter does not advertise, so the next trip would go unnoticed.
+     * Skipped while a live view is evidently attached (it asked for state within
+     * [LIVE_VIEW_RECENT_MS]). Returns whether the link was released. */
+    internal fun releaseLinkOpenedByPresence(): Boolean {
+        val lastQuery = session?.lastLiveStateQueryAtMs
+        if (lastQuery != null && clock.now() - lastQuery < LIVE_VIEW_RECENT_MS) return false
+        bleClient.disconnect()
+        return true
+    }
+
+    /** Records the end of a recording. For one a presence event started, the host gets to find it
+     * later; and when it ended for [cause] reasons that mean the car is parked, and its link was
+     * released ([linkReleased]), further automatic starts pause (see
+     * [CompanionPresencePolicy.isSuppressed]). A link that was kept is somebody else's and the
+     * adapter is not advertising anyway, so nothing needs pausing. */
+    internal fun onRecordingEnded(sessionId: String?, reason: String, cause: AutoEndCause, linkReleased: Boolean) {
+        val store = companionStore ?: return
+        if (!store.finishAutoSession(sessionId, System.currentTimeMillis(), reason)) return
+        if (linkReleased && cause.suppressesNextStart) suppressNextAutoStart()
+    }
+
+    /** A presence start that never became a recording; does not pause further automatic starts. */
+    internal fun onAutoStartFailed(sessionId: String, reason: String) {
+        companionStore?.finishAutoSession(sessionId, System.currentTimeMillis(), reason, failedStart = true)
+    }
+
+    /** Starts [CxRecordingService] from the stored template without a connection yet: the
+     * service connects to the paired adapter itself, because a presence event only entitles the
+     * app to start a `connectedDevice` foreground service immediately, not later. */
+    private fun startAutoRecording(template: ObdStartRecordingRequest): Boolean {
+        val context = appContext ?: return false
+        val request = AutoRecordingTemplate.instantiate(template, System.currentTimeMillis())
+        synchronized(recordingStartLock) {
+            if (recordingOwner != null || pendingRecordingRequest != null) return false
+            pendingRecordingRequest = request
+        }
+        companionStore?.addAutoSession(AutoSession(request.sessionId, request.bufferFilePath, request.startedAtEpochMs))
+        try {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, CxRecordingService::class.java).putExtra(CxRecordingService.EXTRA_CONNECT_FIRST, true),
+            )
+        } catch (e: IllegalStateException) {
+            // `ForegroundServiceStartNotAllowedException` is an `IllegalStateException`.
+            synchronized(recordingStartLock) { pendingRecordingRequest = null }
+            onAutoStartFailed(request.sessionId, "foreground service start not allowed")
+            return false
+        } catch (e: SecurityException) {
+            synchronized(recordingStartLock) { pendingRecordingRequest = null }
+            onAutoStartFailed(request.sessionId, "foreground service start not allowed")
+            return false
+        }
+        return true
+    }
+
+    /** What [CxRecordingService] needs to connect on its own: the paired adapter's handle. */
+    internal fun pairedAdapterHandle(): String? = companionStore?.pairing?.handle
+
+    internal fun peekPendingRecordingRequest(): ObdStartRecordingRequest? =
+        synchronized(recordingStartLock) { pendingRecordingRequest }
+
     override fun startRecording(request: ObdStartRecordingRequest, callback: (Result<Boolean>) -> Unit) {
         val context = appContext
         if (context == null || bleClient.currentState() !is CxLinkState.Connected || session == null) {
@@ -565,6 +766,7 @@ internal constructor(
 
     override fun stopRecording(sessionId: String, callback: (Result<Unit>) -> Unit) {
         recordingOwner?.let { owner -> if (owner.sessionId == sessionId) owner.requestStop() }
+        if (peekPendingRecordingRequest()?.sessionId == sessionId) abortPendingAutoStart(byUser = true)
         callback(Result.success(Unit))
     }
 
@@ -742,6 +944,20 @@ internal constructor(
         @Volatile
         private var instance: ObdApi? = null
 
+        private const val LIVE_VIEW_RECENT_MS = 10_000L
+        private const val REASON_PROCESS_ENDED = "process ended without a clean stop"
+        private const val REASON_START_INCOMPLETE = "start did not complete"
+        private const val REASON_STOPPED_BEFORE_CONNECT = "stopped before the adapter connected"
+
+        private val UNSUPPORTED_COMPANION_STATUS = ObdCompanionStatusMessage(
+            supported = false,
+            presenceSupported = false,
+            paired = false,
+            presenceObserved = false,
+            autoRecordingArmed = false,
+            connectGranted = false,
+        )
+
         /** Placeholder until a real [configure] call — a caller is required to call it before
          * [startRecording], but [ObdApi] itself must never be in a state where reading [config]
          * crashes for having skipped that. */
@@ -758,7 +974,10 @@ internal constructor(
          * never an Activity, for exactly that reason. */
         fun getInstance(context: Context): ObdApi =
             instance ?: synchronized(this) {
-                instance ?: ObdApi(context.applicationContext).also { instance = it }
+                instance ?: ObdApi(context.applicationContext).also {
+                    it.restorePersistedConfig()
+                    instance = it
+                }
             }
 
         /** `ATZ` replies with the adapter's own identification banner, not `OK` — every other

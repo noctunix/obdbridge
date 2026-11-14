@@ -27,6 +27,10 @@ class _FakeNativeObdApi extends NativeObdApi {
   ObdStartRecordingRequest? lastStartRecordingRequest;
   List<ObdModuleMessage>? lastEnqueuedModules;
   List<ObdStepMessage>? lastEnqueuedSteps;
+  String? lastAcknowledgedAutoSession;
+  int setAutoRecordingCalls = 0;
+  ObdStartRecordingRequest? lastAutoRecordingRequest;
+  bool? lastPresenceObservation;
 
   @override
   Future<bool> startLive(ObdPlanMessage plan) async {
@@ -41,6 +45,35 @@ class _FakeNativeObdApi extends NativeObdApi {
   }
 
   @override
+  Future<void> setAutoRecording(ObdStartRecordingRequest? request) async {
+    setAutoRecordingCalls++;
+    lastAutoRecordingRequest = request;
+  }
+
+  @override
+  Future<ObdCompanionStatusMessage> setPresenceObservation(bool enabled) async {
+    lastPresenceObservation = enabled;
+    return _status(presenceObserved: enabled);
+  }
+
+  @override
+  Future<List<ObdAutoSessionMessage>> pendingAutoSessions() async => [
+    ObdAutoSessionMessage(
+      sessionId: 's1',
+      bufferFilePath: '/b/s1.jsonl',
+      startedAtEpochMs: 1,
+    ),
+  ];
+
+  @override
+  Future<void> acknowledgeAutoSession(String sessionId) async {
+    lastAcknowledgedAutoSession = sessionId;
+  }
+
+  @override
+  Future<ObdCompanionStatusMessage> companionStatus() async => _status();
+
+  @override
   Future<ObdOneShotEnqueueResultMessage> enqueueOneShot(
     List<ObdModuleMessage> modules,
     List<ObdStepMessage> steps,
@@ -50,6 +83,17 @@ class _FakeNativeObdApi extends NativeObdApi {
     return ObdOneShotEnqueueResultMessage.accepted;
   }
 }
+
+ObdCompanionStatusMessage _status({bool presenceObserved = false}) =>
+    ObdCompanionStatusMessage(
+      supported: true,
+      presenceSupported: true,
+      paired: true,
+      adapterHandle: 'handle',
+      presenceObserved: presenceObserved,
+      autoRecordingArmed: false,
+      connectGranted: true,
+    );
 
 ObdLimitsMessage _limits() => ObdLimitsMessage(
   maxResponseBytes: 4096,
@@ -221,6 +265,98 @@ void main() {
 
       expect(result, isTrue);
       expect(fake.lastStartRecordingRequest, same(request));
+    });
+  });
+
+  group('ObdBridge.setAutoRecording', () {
+    ObdStartRecordingRequest request(
+      ObdPlanMessage plan, {
+      String path = '/tmp/trips/{sessionId}.jsonl',
+    }) => ObdStartRecordingRequest(
+      sessionId: 'template',
+      vehicleId: 'v1',
+      bufferFilePath: path,
+      startedAtEpochMs: 0,
+      plan: plan,
+      options: _options(),
+    );
+
+    test('a policy-rejected command never reaches the fake native API', () {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_DenyCommandsPolicy({'0105'}), nativeApi: fake);
+
+      expect(
+        () => bridge.setAutoRecording(request(_plan(steps: [_step('0105')]))),
+        throwsA(isA<ObdBridgeCommandRejectedException>()),
+      );
+      expect(fake.setAutoRecordingCalls, 0);
+    });
+
+    test('a hard-guard-rejected command is rejected under allow-all', () {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+
+      final exception = _expectRejection(
+        () => bridge.setAutoRecording(request(_plan(steps: [_step('22F190')]))),
+      );
+      expect(exception.rejectedCommands, contains('22F190'));
+      expect(fake.setAutoRecordingCalls, 0);
+    });
+
+    test('a buffer path without the session placeholder is refused', () {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+
+      expect(
+        () => bridge.setAutoRecording(
+          request(_plan(steps: [_step('0100')]), path: '/tmp/fixed.jsonl'),
+        ),
+        throwsArgumentError,
+      );
+      expect(fake.setAutoRecordingCalls, 0);
+    });
+
+    test('an allowed request passes through unchanged', () async {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+      final allowed = request(_plan(steps: [_step('0100')]));
+
+      await bridge.setAutoRecording(allowed);
+
+      expect(fake.lastAutoRecordingRequest, same(allowed));
+    });
+
+    test('null clears without any policy check', () async {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_DenyCommandsPolicy({'0100'}), nativeApi: fake);
+
+      await bridge.setAutoRecording(null);
+
+      expect(fake.setAutoRecordingCalls, 1);
+      expect(fake.lastAutoRecordingRequest, isNull);
+    });
+  });
+
+  group('ObdBridge companion calls', () {
+    test('presence observation and status are forwarded', () async {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+
+      final status = await bridge.setPresenceObservation(true);
+
+      expect(fake.lastPresenceObservation, isTrue);
+      expect(status.presenceObserved, isTrue);
+      expect((await bridge.companionStatus()).adapterHandle, 'handle');
+    });
+
+    test('auto sessions are listed and acknowledged through', () async {
+      final fake = _FakeNativeObdApi();
+      final bridge = ObdBridge(_AllowAllPolicy(), nativeApi: fake);
+
+      expect((await bridge.pendingAutoSessions()).single.sessionId, 's1');
+      await bridge.acknowledgeAutoSession('s1');
+
+      expect(fake.lastAcknowledgedAutoSession, 's1');
     });
   });
 

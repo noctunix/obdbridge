@@ -875,6 +875,7 @@ class ObdRecordingNotificationMessage {
     required this.title,
     required this.body,
     required this.stopActionLabel,
+    this.connectingBody,
   });
 
   String channelName;
@@ -885,8 +886,12 @@ class ObdRecordingNotificationMessage {
 
   String stopActionLabel;
 
+  /// Shown instead of [body] while a recording started by the paired
+  /// adapter appearing is still connecting to it; `null` keeps [body].
+  String? connectingBody;
+
   List<Object?> _toList() {
-    return <Object?>[channelName, title, body, stopActionLabel];
+    return <Object?>[channelName, title, body, stopActionLabel, connectingBody];
   }
 
   Object encode() {
@@ -900,6 +905,7 @@ class ObdRecordingNotificationMessage {
       title: result[1]! as String,
       body: result[2]! as String,
       stopActionLabel: result[3]! as String,
+      connectingBody: result[4] as String?,
     );
   }
 
@@ -916,7 +922,8 @@ class ObdRecordingNotificationMessage {
     return _deepEquals(channelName, other.channelName) &&
         _deepEquals(title, other.title) &&
         _deepEquals(body, other.body) &&
-        _deepEquals(stopActionLabel, other.stopActionLabel);
+        _deepEquals(stopActionLabel, other.stopActionLabel) &&
+        _deepEquals(connectingBody, other.connectingBody);
   }
 
   @override
@@ -938,6 +945,7 @@ class ObdBridgeConfigMessage {
     required this.smallIconResourceName,
     required this.sharedPreferencesName,
     required this.bufferFormatId,
+    this.autoStartSuppressionMinutes,
   });
 
   /// Fully qualified class name (`Class.forName`) of the `Activity` the
@@ -957,12 +965,21 @@ class ObdBridgeConfigMessage {
   /// using theirs so previously recorded buffers still import correctly.
   String bufferFormatId;
 
+  /// After a recording native started on its own was stopped for being idle
+  /// or by the user, and its link was released, native starts no further one
+  /// until the adapter was seen leaving or this many minutes passed. Prevents
+  /// an empty recording loop next to a parked car, where the adapter
+  /// advertises again as soon as the link is released. `null` means 30;
+  /// values are clamped to 0..1440 (`0` disables the pause).
+  int? autoStartSuppressionMinutes;
+
   List<Object?> _toList() {
     return <Object?>[
       activityClassName,
       smallIconResourceName,
       sharedPreferencesName,
       bufferFormatId,
+      autoStartSuppressionMinutes,
     ];
   }
 
@@ -977,6 +994,7 @@ class ObdBridgeConfigMessage {
       smallIconResourceName: result[1]! as String,
       sharedPreferencesName: result[2]! as String,
       bufferFormatId: result[3]! as String,
+      autoStartSuppressionMinutes: result[4] as int?,
     );
   }
 
@@ -992,7 +1010,11 @@ class ObdBridgeConfigMessage {
     return _deepEquals(activityClassName, other.activityClassName) &&
         _deepEquals(smallIconResourceName, other.smallIconResourceName) &&
         _deepEquals(sharedPreferencesName, other.sharedPreferencesName) &&
-        _deepEquals(bufferFormatId, other.bufferFormatId);
+        _deepEquals(bufferFormatId, other.bufferFormatId) &&
+        _deepEquals(
+          autoStartSuppressionMinutes,
+          other.autoStartSuppressionMinutes,
+        );
   }
 
   @override
@@ -1243,6 +1265,178 @@ class ObdRecordingStateMessage {
   int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
 }
 
+/// State of the one-time pairing through the platform's companion-device
+/// mechanism and of the presence observation built on it. The adapter is
+/// only ever identified by [adapterHandle], never by its address.
+class ObdCompanionStatusMessage {
+  ObdCompanionStatusMessage({
+    required this.supported,
+    required this.presenceSupported,
+    required this.paired,
+    this.adapterHandle,
+    this.advertisedName,
+    required this.presenceObserved,
+    required this.autoRecordingArmed,
+    required this.connectGranted,
+  });
+
+  /// The platform can pair an adapter at all (Android 8.0 / API 26 and up).
+  bool supported;
+
+  /// The platform can also report the paired adapter coming into and
+  /// leaving radio range (Android 12 / API 31 and up). Below that,
+  /// pairing still lets [NativeObdApi.connect] reach the adapter without a
+  /// scan, but [presenceObserved] can never become `true`.
+  bool presenceSupported;
+
+  bool paired;
+
+  /// Stable across process restarts for as long as the pairing exists; the
+  /// value [NativeObdApi.connect] accepts without a prior scan.
+  String? adapterHandle;
+
+  /// Display-only name the platform recorded at pairing time.
+  String? advertisedName;
+
+  /// Presence observation was requested and the platform accepted it.
+  bool presenceObserved;
+
+  /// A request stored by [NativeObdApi.setAutoRecording] will be started
+  /// when the adapter appears.
+  bool autoRecordingArmed;
+
+  /// The permission needed to connect to the paired adapter without a scan
+  /// is granted (`BLUETOOTH_CONNECT` from API 31, nothing below).
+  /// [NativeObdApi.permissionStatus] still describes scanning and so reports
+  /// denied for a host that only ever connects to a paired adapter.
+  bool connectGranted;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      supported,
+      presenceSupported,
+      paired,
+      adapterHandle,
+      advertisedName,
+      presenceObserved,
+      autoRecordingArmed,
+      connectGranted,
+    ];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static ObdCompanionStatusMessage decode(Object result) {
+    result as List<Object?>;
+    return ObdCompanionStatusMessage(
+      supported: result[0]! as bool,
+      presenceSupported: result[1]! as bool,
+      paired: result[2]! as bool,
+      adapterHandle: result[3] as String?,
+      advertisedName: result[4] as String?,
+      presenceObserved: result[5]! as bool,
+      autoRecordingArmed: result[6]! as bool,
+      connectGranted: result[7]! as bool,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ObdCompanionStatusMessage ||
+        other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(supported, other.supported) &&
+        _deepEquals(presenceSupported, other.presenceSupported) &&
+        _deepEquals(paired, other.paired) &&
+        _deepEquals(adapterHandle, other.adapterHandle) &&
+        _deepEquals(advertisedName, other.advertisedName) &&
+        _deepEquals(presenceObserved, other.presenceObserved) &&
+        _deepEquals(autoRecordingArmed, other.autoRecordingArmed) &&
+        _deepEquals(connectGranted, other.connectGranted);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+}
+
+/// One recording native started on its own (see
+/// [NativeObdApi.setAutoRecording]), kept until the host acknowledges it so
+/// the host can import the buffer even though no Dart code ran at the time.
+class ObdAutoSessionMessage {
+  ObdAutoSessionMessage({
+    required this.sessionId,
+    required this.bufferFilePath,
+    required this.startedAtEpochMs,
+    this.endedAtEpochMs,
+    this.endReason,
+  });
+
+  String sessionId;
+
+  String bufferFilePath;
+
+  int startedAtEpochMs;
+
+  /// `null` while the recording may still be running.
+  int? endedAtEpochMs;
+
+  /// Why it ended, or why it never began (e.g. the adapter was unreachable).
+  String? endReason;
+
+  List<Object?> _toList() {
+    return <Object?>[
+      sessionId,
+      bufferFilePath,
+      startedAtEpochMs,
+      endedAtEpochMs,
+      endReason,
+    ];
+  }
+
+  Object encode() {
+    return _toList();
+  }
+
+  static ObdAutoSessionMessage decode(Object result) {
+    result as List<Object?>;
+    return ObdAutoSessionMessage(
+      sessionId: result[0]! as String,
+      bufferFilePath: result[1]! as String,
+      startedAtEpochMs: result[2]! as int,
+      endedAtEpochMs: result[3] as int?,
+      endReason: result[4] as String?,
+    );
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  bool operator ==(Object other) {
+    if (other is! ObdAutoSessionMessage || other.runtimeType != runtimeType) {
+      return false;
+    }
+    if (identical(this, other)) {
+      return true;
+    }
+    return _deepEquals(sessionId, other.sessionId) &&
+        _deepEquals(bufferFilePath, other.bufferFilePath) &&
+        _deepEquals(startedAtEpochMs, other.startedAtEpochMs) &&
+        _deepEquals(endedAtEpochMs, other.endedAtEpochMs) &&
+        _deepEquals(endReason, other.endReason);
+  }
+
+  @override
+  // ignore: avoid_equals_and_hash_code_on_mutable_classes
+  int get hashCode => _deepHash(<Object?>[runtimeType, ..._toList()]);
+}
+
 class _PigeonCodec extends StandardMessageCodec {
   const _PigeonCodec();
   @override
@@ -1316,6 +1510,12 @@ class _PigeonCodec extends StandardMessageCodec {
     } else if (value is ObdRecordingStateMessage) {
       buffer.putUint8(150);
       writeValue(buffer, value.encode());
+    } else if (value is ObdCompanionStatusMessage) {
+      buffer.putUint8(151);
+      writeValue(buffer, value.encode());
+    } else if (value is ObdAutoSessionMessage) {
+      buffer.putUint8(152);
+      writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
     }
@@ -1384,6 +1584,10 @@ class _PigeonCodec extends StandardMessageCodec {
         return ObdStartRecordingRequest.decode(readValue(buffer)!);
       case 150:
         return ObdRecordingStateMessage.decode(readValue(buffer)!);
+      case 151:
+        return ObdCompanionStatusMessage.decode(readValue(buffer)!);
+      case 152:
+        return ObdAutoSessionMessage.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
     }
@@ -1513,6 +1717,174 @@ class NativeObdApi {
       isNullValid: false,
     );
     return pigeonVar_replyValue! as ObdPermissionStatusMessage;
+  }
+
+  /// Pairing and presence state; a pure read.
+  Future<ObdCompanionStatusMessage> companionStatus() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.companionStatus$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ObdCompanionStatusMessage;
+  }
+
+  /// Pairs the CX adapter once through the platform's companion-device
+  /// dialog and remembers it across process restarts. Resolves the status
+  /// after the user answered the dialog; [ObdCompanionStatusMessage.paired]
+  /// is `false` when pairing is unsupported, no `Activity` is attached,
+  /// the user declined, or nothing was found. Pairing again while already
+  /// paired replaces the previous pairing.
+  Future<ObdCompanionStatusMessage> pairAdapter() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.pairAdapter$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ObdCompanionStatusMessage;
+  }
+
+  /// Stops presence observation, removes the platform pairing and erases
+  /// everything remembered about the adapter, including the stored
+  /// [setAutoRecording] request.
+  Future<ObdCompanionStatusMessage> forgetAdapter() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.forgetAdapter$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ObdCompanionStatusMessage;
+  }
+
+  /// Starts or stops the platform watching for the paired adapter. A no-op
+  /// without a pairing or below API 31 (see
+  /// [ObdCompanionStatusMessage.presenceSupported]).
+  Future<ObdCompanionStatusMessage> setPresenceObservation(bool enabled) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.setPresenceObservation$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[enabled],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return pigeonVar_replyValue! as ObdCompanionStatusMessage;
+  }
+
+  /// Stores (or, with `null`, clears) the recording native starts on its
+  /// own when the paired adapter appears and nothing is recording yet,
+  /// without a Flutter engine. [ObdStartRecordingRequest.sessionId] and
+  /// [ObdStartRecordingRequest.startedAtEpochMs] are replaced at every
+  /// start with a fresh UUIDv7 and the current time, and every
+  /// `{sessionId}` in [ObdStartRecordingRequest.bufferFilePath] with that
+  /// id, so one stored request yields a new buffer per trip. A request
+  /// whose path has no `{sessionId}` is rejected by the Dart facade.
+  ///
+  /// The request is discarded natively when the host app's version code
+  /// differs from the one it was stored under, so an app update never runs
+  /// an old plan before the host stored it again.
+  Future<void> setAutoRecording(ObdStartRecordingRequest? request) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.setAutoRecording$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[request],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
+  }
+
+  /// Every automatically started recording not yet acknowledged, oldest
+  /// first, including ones whose start failed. Survives
+  /// [forgetAdapter]: the buffers stay on disk until acknowledged.
+  Future<List<ObdAutoSessionMessage>> pendingAutoSessions() async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.pendingAutoSessions$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: false,
+    );
+    return (pigeonVar_replyValue! as List<Object?>)
+        .cast<ObdAutoSessionMessage>();
+  }
+
+  /// Forgets [sessionId]; a no-op for an unknown id. Call after the buffer
+  /// was imported (see [acknowledgeImported]).
+  Future<void> acknowledgeAutoSession(String sessionId) async {
+    final pigeonVar_channelName =
+        'dev.flutter.pigeon.obdbridge.NativeObdApi.acknowledgeAutoSession$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(
+      <Object?>[sessionId],
+    );
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+      pigeonVar_replyList,
+      pigeonVar_channelName,
+      isNullValid: true,
+    );
   }
 
   /// Scans for up to [durationMs] and resolves every adapter discovered
@@ -1873,6 +2245,52 @@ abstract class ObdEventsApi {
               args[0]! as ObdSignalExchangeMessage;
           try {
             api.onOneShotResult(arg_result);
+            return wrapResponse(empty: true);
+          } on PlatformException catch (e) {
+            return wrapResponse(error: e);
+          } catch (e) {
+            return wrapResponse(
+              error: PlatformException(code: 'error', message: e.toString()),
+            );
+          }
+        });
+      }
+    }
+  }
+}
+
+/// Presence events for the paired adapter, kept apart from [ObdEventsApi]
+/// so existing implementers of that interface are unaffected.
+abstract class ObdPresenceEventsApi {
+  static const MessageCodec<Object?> pigeonChannelCodec = _PigeonCodec();
+
+  /// The paired adapter came into (`true`) or left (`false`) radio range
+  /// while a Flutter engine was attached. An adapter that is connected
+  /// stops advertising, so `false` does not mean the trip is over.
+  void onAdapterPresence(bool present);
+
+  static void setUp(
+    ObdPresenceEventsApi? api, {
+    BinaryMessenger? binaryMessenger,
+    String messageChannelSuffix = '',
+  }) {
+    messageChannelSuffix = messageChannelSuffix.isNotEmpty
+        ? '.$messageChannelSuffix'
+        : '';
+    {
+      final pigeonVar_channel = BasicMessageChannel<Object?>(
+        'dev.flutter.pigeon.obdbridge.ObdPresenceEventsApi.onAdapterPresence$messageChannelSuffix',
+        pigeonChannelCodec,
+        binaryMessenger: binaryMessenger,
+      );
+      if (api == null) {
+        pigeonVar_channel.setMessageHandler(null);
+      } else {
+        pigeonVar_channel.setMessageHandler((Object? message) async {
+          final List<Object?> args = message! as List<Object?>;
+          final bool arg_present = args[0]! as bool;
+          try {
+            api.onAdapterPresence(arg_present);
             return wrapResponse(empty: true);
           } on PlatformException catch (e) {
             return wrapResponse(error: e);

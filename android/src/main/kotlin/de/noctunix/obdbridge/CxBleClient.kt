@@ -83,6 +83,11 @@ interface CxBleIoCallback {
  */
 interface CxBleIo {
     fun hasRequiredPermissions(): Boolean
+
+    /** Permissions needed to connect to an adapter whose address is already known, which is less
+     * than scanning for one: [hasRequiredPermissions] unless an implementation knows better. */
+    fun hasConnectPermission(): Boolean = hasRequiredPermissions()
+
     fun isBluetoothEnabled(): Boolean
 
     /** Scans for up to [durationMs]; `onResult` fires once per discovered adapter.
@@ -178,6 +183,8 @@ class CxBleClient(private val io: CxBleIo) {
 
     fun hasRequiredPermissions(): Boolean = io.hasRequiredPermissions()
 
+    fun hasConnectPermission(): Boolean = io.hasConnectPermission()
+
     fun isBluetoothEnabled(): Boolean = io.isBluetoothEnabled()
 
     /** Whether [handle] is the one adapter this client is currently `Connected` to — the check
@@ -240,7 +247,7 @@ class CxBleClient(private val io: CxBleIo) {
         if (activeHandle != null) {
             return false
         }
-        if (!io.hasRequiredPermissions()) {
+        if (!io.hasConnectPermission()) {
             setState(CxLinkState.Failed(CxLinkFailure.PERMISSION_DENIED, handle))
             return false
         }
@@ -350,6 +357,19 @@ class CxAdapterHandleRegistry {
 
     @Synchronized
     fun addressFor(handle: CxAdapterHandle): String? = addressByHandle[handle]
+
+    /** Pins [handle] to [address], replacing whatever either was mapped to before. Used for an
+     * adapter remembered across restarts, whose handle must stay valid without a scan. */
+    @Synchronized
+    fun register(handle: CxAdapterHandle, address: String) {
+        addressByHandle.put(handle, address)?.let { handleByAddress.remove(it) }
+        handleByAddress.put(address, handle)?.let { if (it != handle) addressByHandle.remove(it) }
+    }
+
+    @Synchronized
+    fun remove(handle: CxAdapterHandle) {
+        addressByHandle.remove(handle)?.let { handleByAddress.remove(it) }
+    }
 }
 
 /**
@@ -391,12 +411,14 @@ private const val REQUESTED_MTU = 247
  * adding a second scanning library next to the one below), the Nordic Android BLE Library for
  * bonding, connecting, service verification and notification subscription.
  */
-class AndroidCxBleIo(private val context: Context) : CxBleIo {
+class AndroidCxBleIo(
+    private val context: Context,
+    private val handles: CxAdapterHandleRegistry = CxAdapterHandleRegistry(),
+) : CxBleIo {
 
     private val bluetoothManager: BluetoothManager?
         get() = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
 
-    private val handles = CxAdapterHandleRegistry()
     private val scanTimeoutHandler = Handler(Looper.getMainLooper())
 
     private var activeScanCallback: ScanCallback? = null
@@ -412,6 +434,9 @@ class AndroidCxBleIo(private val context: Context) : CxBleIo {
             granted(Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
+
+    override fun hasConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S || granted(Manifest.permission.BLUETOOTH_CONNECT)
 
     private fun granted(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED

@@ -53,4 +53,36 @@ class CxAdapterHandleRegistryTest {
 
         assertNull(registry.addressFor("some-handle-never-issued"))
     }
+
+    @Test
+    fun registerPinsAHandleSoItResolvesWithoutAScan() {
+        val registry = CxAdapterHandleRegistry()
+
+        registry.register("remembered", "AA:BB:CC:DD:EE:FF")
+
+        assertEquals("AA:BB:CC:DD:EE:FF", registry.addressFor("remembered"))
+        assertEquals("remembered", registry.handleFor("AA:BB:CC:DD:EE:FF"))
+    }
+
+    @Test
+    fun registerReplacesAnEarlierHandleForTheSameAddress() {
+        val registry = CxAdapterHandleRegistry()
+        val scanned = registry.handleFor("AA:BB:CC:DD:EE:FF")
+
+        registry.register("remembered", "AA:BB:CC:DD:EE:FF")
+
+        assertNull(registry.addressFor(scanned))
+        assertEquals("remembered", registry.handleFor("AA:BB:CC:DD:EE:FF"))
+    }
+
+    @Test
+    fun removeForgetsBothDirections() {
+        val registry = CxAdapterHandleRegistry()
+        registry.register("remembered", "AA:BB:CC:DD:EE:FF")
+
+        registry.remove("remembered")
+
+        assertNull(registry.addressFor("remembered"))
+        assertNotEquals("remembered", registry.handleFor("AA:BB:CC:DD:EE:FF"))
+    }
 }

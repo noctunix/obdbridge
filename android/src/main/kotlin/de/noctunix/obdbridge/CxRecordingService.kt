@@ -69,6 +69,20 @@ class CxRecordingService : Service() {
     private var adapterHandle: String? = null
     private var reconnectAttempts = 0
 
+    /** `true` while a presence-triggered start is still connecting to the paired adapter, before
+     * [sessionId] is set. */
+    @Volatile
+    private var awaitingConnection = false
+    private var connectStartedAtMs = 0L
+    private var connectFailures = 0
+
+    /** A connect attempt of this service is running; only then is a link of ours to tear down. */
+    private var attemptInFlight = false
+
+    /** `true` when this service itself opened the link (a presence start): nobody else owns it,
+     * so it is released when the recording ends. */
+    private var openedByPresence = false
+
     /** [SystemClock.elapsedRealtime] when the current gap began, `null` while vehicle reads
      * succeed. Elapsed rather than uptime: uptime stops while the device sleeps, which would
      * stretch a gap spanning a night of Doze into minutes. */
@@ -100,27 +114,140 @@ class CxRecordingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (sessionId != null) {
+        if (sessionId != null || awaitingConnection) {
             // Already recording — a duplicate start intent (e.g. the system redelivering before
             // this service fully reported itself started) must not re-initialize anything.
             return START_NOT_STICKY
         }
         val obd = ObdApi.getInstance(applicationContext)
-        val pending = obd.consumePendingRecordingRequest()
+        val pending = obd.peekPendingRecordingRequest()
+        val connectFirst = intent?.getBooleanExtra(EXTRA_CONNECT_FIRST, false) == true
         // `startForeground` must be called on every path through this method once the system has
         // already launched this service via `startForegroundService` — calling `stopSelf()`
         // without ever reaching `startForeground` is the documented "did not then call
         // Service.startForeground()" crash, regardless of how early a later check fails.
-        if (!startForegroundSafely(pending?.notification)) {
-            pending?.let { reportFailedStart(obd, it, "foreground service start refused") }
+        if (!startForegroundSafely(pending?.notification, connecting = connectFirst)) {
+            obd.consumePendingRecordingRequest()?.let { reportFailedStart(obd, it, "foreground service start refused") }
             stopSelf()
             return START_NOT_STICKY
         }
+        if (!connectFirst || pending == null) {
+            beginPendingOrStop(obd)
+            return START_NOT_STICKY
+        }
+        // A presence start must never fall back to whatever connection happens to exist.
+        val handle = obd.pairedAdapterHandle()
+        when {
+            handle == null -> failAwaitedStart(obd, "no paired adapter")
+            obd.isConnectedTo(handle) -> beginPendingOrStop(obd)
+            else -> {
+                awaitingConnection = true
+                obd.pendingStartOwner = this
+                connectStartedAtMs = SystemClock.elapsedRealtime()
+                connectFailures = 0
+                attemptConnect(obd, handle, pending.plan.limits)
+            }
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun attemptConnect(obd: ObdApi, handle: String, limits: ObdLimitsMessage) {
+        if (!awaitingConnection) return
+        if (obd.pairedAdapterHandle() != handle) {
+            failAwaitedStart(obd, "pairing removed")
+            return
+        }
+        if (obd.isConnectedTo(handle)) {
+            // The host connected while this start was waiting; that link is not ours to release.
+            finishConnecting(obd, openedHere = false)
+            return
+        }
+        // Retrying cannot fix either of these; the user has to.
+        if (!obd.canAttemptConnect()) {
+            failAwaitedStart(obd, "bluetooth off or permission missing")
+            return
+        }
+        attemptInFlight = true
+        obd.reconnectForRecording(handle) { connected ->
+            attemptInFlight = false
+            if (!awaitingConnection) {
+                // The start was abandoned while this attempt was in flight.
+                if (connected) obd.disconnect { }
+                return@reconnectForRecording
+            }
+            if (connected) {
+                finishConnecting(obd, openedHere = true)
+                return@reconnectForRecording
+            }
+            connectFailures++
+            val delay = PresenceConnectPolicy.nextDelayMs(
+                failedAttempts = connectFailures,
+                maxAttempts = limits.maxReconnectAttemptsPerGap,
+                elapsedMs = SystemClock.elapsedRealtime() - connectStartedAtMs,
+                minMs = limits.reconnectBackoffMinMs,
+                maxMs = limits.reconnectBackoffMaxMs,
+            )
+            if (delay == null) {
+                failAwaitedStart(obd, "paired adapter not reachable")
+            } else {
+                retryTarget = Triple(obd, handle, limits)
+                handler.postDelayed(connectRetry, delay)
+            }
+        }
+    }
+
+    private val connectRetry = Runnable { retryTarget?.let { (obd, handle, limits) -> attemptConnect(obd, handle, limits) } }
+    private var retryTarget: Triple<ObdApi, String, ObdLimitsMessage>? = null
+
+    private fun finishConnecting(obd: ObdApi, openedHere: Boolean) {
+        endAwaiting(obd)
+        openedByPresence = openedHere
+        // Back from the "connecting" text, if the host supplied one.
+        obd.peekPendingRecordingRequest()?.notification?.takeIf { it.connectingBody != null }
+            ?.let { startForegroundSafely(it) }
+        beginPendingOrStop(obd)
+    }
+
+    private fun failAwaitedStart(obd: ObdApi, reason: String) {
+        endAwaiting(obd)
+        obd.consumePendingRecordingRequest()?.let { reportFailedStart(obd, it, reason) }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun endAwaiting(obd: ObdApi) {
+        awaitingConnection = false
+        obd.pendingStartOwner = null
+        handler.removeCallbacks(connectRetry)
+        retryTarget = null
+    }
+
+    /** Stop action, Dart's stop ([byUser]) or forgetting the adapter while a presence start is
+     * still connecting: drops the request and, only if an attempt of this service is in flight,
+     * that attempt. A connection the host opened itself is left alone. */
+    internal fun abortAwaitingConnection(byUser: Boolean) {
+        if (!awaitingConnection) return
+        val obd = ObdApi.getInstance(applicationContext)
+        val attemptWasInFlight = attemptInFlight
+        attemptInFlight = false
+        endAwaiting(obd)
+        obd.consumePendingRecordingRequest()?.let { reportFailedStart(obd, it, "stopped before the adapter connected") }
+        if (byUser) obd.suppressNextAutoStart()
+        if (attemptWasInFlight) obd.disconnect { }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun beginPendingOrStop(obd: ObdApi) {
+        val pending = obd.consumePendingRecordingRequest()
         if (pending == null || !beginRecording(obd, pending)) {
+            if (openedByPresence) {
+                openedByPresence = false
+                obd.releaseLinkOpenedByPresence()
+            }
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
-        return START_NOT_STICKY
     }
 
     /** Reports a start that never actually became a running recording — without this, Dart's
@@ -129,6 +256,7 @@ class CxRecordingService : Service() {
      * caller is expected to match this against the `sessionId` it just tried to start, not
      * assume every `interrupted` state belongs to it. */
     private fun reportFailedStart(obd: ObdApi, startRequest: ObdStartRecordingRequest, reason: String) {
+        obd.onAutoStartFailed(startRequest.sessionId, reason)
         obd.reportRecordingEnded(
             CxRecordingState(
                 sessionId = startRequest.sessionId,
@@ -143,6 +271,14 @@ class CxRecordingService : Service() {
     }
 
     override fun onDestroy() {
+        if (awaitingConnection) {
+            val obd = ObdApi.getInstance(applicationContext)
+            val attemptWasInFlight = attemptInFlight
+            attemptInFlight = false
+            endAwaiting(obd)
+            obd.consumePendingRecordingRequest()?.let { reportFailedStart(obd, it, "service destroyed before the adapter connected") }
+            if (attemptWasInFlight) obd.disconnect { }
+        }
         // Unconditional, unlike a plain "mark interrupted and stop": `recordingOwner`/the
         // disconnect listener on `ObdApi` must never keep pointing at a destroyed instance —
         // doing so would hang `recordingState()` on this recording's last phase and reject every
@@ -160,13 +296,14 @@ class CxRecordingService : Service() {
 
     // ── start ────────────────────────────────────────────────────────────
 
-    private fun startForegroundSafely(text: ObdRecordingNotificationMessage?): Boolean {
+    private fun startForegroundSafely(text: ObdRecordingNotificationMessage?, connecting: Boolean = false): Boolean {
         ensureNotificationChannel(text?.channelName ?: "OBD recording")
+        val shown = if (connecting && text?.connectingBody != null) text.copy(body = text.connectingBody!!) else text
         return try {
             if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(NOTIFICATION_ID, buildNotification(text), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                startForeground(NOTIFICATION_ID, buildNotification(shown), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             } else {
-                startForeground(NOTIFICATION_ID, buildNotification(text))
+                startForeground(NOTIFICATION_ID, buildNotification(shown))
             }
             true
         } catch (e: Exception) {
@@ -275,7 +412,9 @@ class CxRecordingService : Service() {
             idleVehicleStopAfterMs = plan.limits.idleVehicleStopAfterMs,
             quietModuleBackoffMs = plan.limits.quietModuleBackoffMs,
             onConsecutiveFailuresExceeded = { stopped -> onConsecutiveFailuresExceeded(obd, stopped) },
-            onIdleVehicleDetected = { endRecordingInternal(CxRecordingPhase.STOPPED, "vehicle idle, no data on any signal") },
+            onIdleVehicleDetected = {
+                endRecordingInternal(CxRecordingPhase.STOPPED, "vehicle idle, no data on any signal", cause = AutoEndCause.IDLE_STOP)
+            },
             sink = { exchange -> onExchange(exchange, timebase.first) },
         )
         poller = newPoller
@@ -502,7 +641,13 @@ class CxRecordingService : Service() {
      * this service's own decision and goes straight to [endRecordingInternal] with its own
      * reason). */
     fun requestStop() {
-        handler.post { endRecordingInternal(CxRecordingPhase.STOPPED, "stopped by user") }
+        handler.post {
+            if (awaitingConnection) {
+                abortAwaitingConnection(byUser = true)
+            } else {
+                endRecordingInternal(CxRecordingPhase.STOPPED, "stopped by user", cause = AutoEndCause.USER_STOP)
+            }
+        }
     }
 
     /** Ends the recording and, before closing [writer], appends [reason] as the buffer's own
@@ -511,7 +656,12 @@ class CxRecordingService : Service() {
      * limit was what just ended the recording (see [CxBufferWriter.appendGap]'s own `force`
      * parameter); never through an actual write failure, which [CxBufferWriter.appendGap]
      * refuses regardless. */
-    private fun endRecordingInternal(endPhase: CxRecordingPhase, reason: String, writeFailed: Boolean = false) {
+    private fun endRecordingInternal(
+        endPhase: CxRecordingPhase,
+        reason: String,
+        writeFailed: Boolean = false,
+        cause: AutoEndCause = AutoEndCause.OTHER,
+    ) {
         if (sessionId == null) return
         handler.removeCallbacksAndMessages(null)
         releaseWakeLock()
@@ -534,6 +684,9 @@ class CxRecordingService : Service() {
         obd.reportRecordingEnded(finalState)
         obd.setRecordingDisconnectListener(null)
         obd.attachRecordingOwner(null)
+        val linkReleased = openedByPresence && obd.releaseLinkOpenedByPresence()
+        openedByPresence = false
+        obd.onRecordingEnded(finalState.sessionId, reason, cause, linkReleased)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -641,6 +794,8 @@ class CxRecordingService : Service() {
     }
 
     companion object {
+        /** Start-intent extra: connect to the paired adapter first instead of reusing a connection. */
+        internal const val EXTRA_CONNECT_FIRST = "de.noctunix.obdbridge.extra.CONNECT_FIRST"
         private const val NOTIFICATION_CHANNEL_ID = "de.noctunix.obdbridge.recording"
         private const val NOTIFICATION_ID = 4781
         private const val ACTION_STOP = "de.noctunix.obdbridge.action.STOP_OBD_RECORDING"

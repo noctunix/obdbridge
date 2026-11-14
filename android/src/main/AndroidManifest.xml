@@ -30,6 +30,18 @@
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
+    <!-- Companion-device pairing of the adapter. Optional: without the feature the plugin falls
+         back to scanning. -->
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE"
+        tools:targetApi="31" />
+    <!-- Lets the presence service start the connectedDevice recording service while the app is in
+         the background. -->
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND"
+        tools:targetApi="34" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND"
+        tools:targetApi="31" />
+
     <application>
         <!-- The buffered recording's foreground service. Not exported — only
              ObdApi.startRecording ever starts it. -->
@@ -37,5 +49,15 @@
             android:name="de.noctunix.obdbridge.CxRecordingService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Bound by the platform when the paired adapter appears (ObdCompanionService). -->
+        <service
+            android:name="de.noctunix.obdbridge.ObdCompanionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
