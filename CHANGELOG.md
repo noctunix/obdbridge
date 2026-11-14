@@ -1,3 +1,40 @@
+## 0.3.0
+
+- Companion-device pairing: `pairAdapter` pairs the CX once through
+  `CompanionDeviceManager` and remembers it across restarts; `connect` then
+  accepts the remembered adapter's handle without a scan. `forgetAdapter`,
+  `companionStatus` and `setPresenceObservation` complete the contract.
+- An exported `CompanionDeviceService` reports the paired adapter appearing
+  and disappearing to `ObdBridgePresence.listener` (Kotlin, works without a
+  Flutter engine) and to the new `ObdPresenceEventsApi` (a separate Flutter
+  API; `ObdEventsApi` is unchanged). On appearance it starts the recording
+  stored with `setAutoRecording`, if nothing is recording and the start is
+  not suppressed; "disappeared" never stops a recording.
+- A presence start connects with bounded retries inside the foreground
+  service, releases the link it opened when the recording ends, and pauses
+  further automatic starts after an idle or user stop until the adapter left
+  or `ObdBridgeConfigMessage.autoStartSuppressionMinutes` (default 30) passed.
+- `pendingAutoSessions`/`acknowledgeAutoSession` let a host find recordings
+  native started without Dart code running.
+- `setAutoRecording` stores a start-recording template (fresh session id and
+  buffer path per trip via `{sessionId}`) after the same policy check as
+  `startRecording`, tied to the host's version code. The host config is now
+  persisted on `configure`.
+- Manifest: optional `companion_device_setup` feature, the three companion
+  permissions and the exported `ObdCompanionService` now appear in every
+  host's merged manifest (removal snippet in the README). The plugin is
+  `ActivityAware`. Hosts should exclude `obdbridge_companion.xml` from
+  backup (README).
+- `ObdCapabilitiesMessage.autoConnectOnPresence` is `true` from API 31.
+- `ObdCompanionStatusMessage.connectGranted` reports the connect-level permission;
+  `permissionStatus` is unchanged and keeps describing scanning.
+- `ObdRecordingNotificationMessage.connectingBody` shows a different text
+  while a presence start connects. Connecting to a known address needs only
+  `BLUETOOTH_CONNECT`.
+- Source-compatible for Dart callers: no existing interface gained a
+  member, and `ObdBridgeConfigMessage`/`ObdRecordingNotificationMessage`
+  gained optional fields.
+
 ## 0.2.11
 
 - The guard accepts a UDS ReadDataByIdentifier request with up to three
