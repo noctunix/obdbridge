@@ -53,11 +53,14 @@ abstract class CommandPolicy {
 /// allowed.
 ///
 /// Allows only a fixed allow-list of adapter `AT`/`ST` commands, OBD mode
-/// 01 reads (`01` + a 2-hex-digit PID), and UDS ReadDataByIdentifier (`22`
+/// 01 reads (`01` + a 2-hex-digit PID), UDS ReadDataByIdentifier (`22`
 /// + one to [maxDidsPerRead] distinct 4-hex-digit DIDs, ISO 14229-1
 /// §10.2) none of which is the VIN (`F190`, `F802`) or ECU serial number
-/// (`F18C`) identifier. Every other service, and anything that is not
-/// well-formed hex, is rejected.
+/// (`F18C`) identifier, and the three ReadDTCInformation (`19`) reports
+/// that only list or count stored fault codes: `1901` and `1902` + a
+/// status mask, and `190A`. Every other service and sub-function (so
+/// ClearDiagnosticInformation `14` and OBD mode 04 stay unreachable), and
+/// anything that is not well-formed hex, is rejected.
 ///
 /// The adapter allow-list is exact, not a bare `AT`/`ST` prefix check:
 /// STN-chip `ST` commands can transmit arbitrary CAN frames (`STPX`) or
@@ -69,6 +72,10 @@ class HardGuard {
 
   static final RegExp _canonical = RegExp(r'^[0-9A-Z@]+$');
   static final RegExp _hex = RegExp(r'^[0-9A-F]+$');
+
+  // reportNumberOfDTCByStatusMask, reportDTCByStatusMask (each with a
+  // one-byte status mask) and reportSupportedDTC.
+  static final RegExp _readDtcReport = RegExp(r'^(?:190[12][0-9A-F]{2}|190A)$');
 
   /// The most DIDs one ReadDataByIdentifier request may carry: a request
   /// must fit one CAN single frame (7 data bytes), since the ELM327
@@ -189,6 +196,13 @@ class HardGuard {
           return const GuardRejected('repeated identifier');
         }
         return GuardAllowed(command);
+      case '19':
+        if (_readDtcReport.hasMatch(command)) {
+          return GuardAllowed(command);
+        }
+        return const GuardRejected(
+          'ReadDTCInformation sub-function not allowed',
+        );
       default:
         return GuardRejected('service $service not allowed');
     }

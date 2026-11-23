@@ -48,11 +48,14 @@ interface CommandPolicy {
  * allowed.
  *
  * Allows only a fixed allow-list of adapter `AT`/`ST` commands, OBD mode
- * 01 reads (`01` + a 2-hex-digit PID), and UDS ReadDataByIdentifier (`22`
+ * 01 reads (`01` + a 2-hex-digit PID), UDS ReadDataByIdentifier (`22`
  * + one to [MAX_DIDS_PER_READ] distinct 4-hex-digit DIDs, ISO 14229-1
  * §10.2) none of which is the VIN (`F190`, `F802`) or ECU serial number
- * (`F18C`) identifier. Every other service, and anything that is not
- * well-formed hex, is rejected.
+ * (`F18C`) identifier, and the three ReadDTCInformation (`19`) reports
+ * that only list or count stored fault codes: `1901` and `1902` + a
+ * status mask, and `190A`. Every other service and sub-function (so
+ * ClearDiagnosticInformation `14` and OBD mode 04 stay unreachable), and
+ * anything that is not well-formed hex, is rejected.
  *
  * The adapter allow-list is exact, not a bare `AT`/`ST` prefix check:
  * STN-chip `ST` commands can transmit arbitrary CAN frames (`STPX`) or
@@ -63,6 +66,10 @@ interface CommandPolicy {
 object HardGuard {
     private val CANONICAL = Regex("^[0-9A-Z@]+$")
     private val HEX = Regex("^[0-9A-F]+$")
+
+    // reportNumberOfDTCByStatusMask, reportDTCByStatusMask (each with a
+    // one-byte status mask) and reportSupportedDTC.
+    private val READ_DTC_REPORT = Regex("^(?:190[12][0-9A-F]{2}|190A)$")
 
     // A request must fit one CAN single frame (7 data bytes): the ELM327
     // command set cannot send a segmented request, so service + 3 DIDs is
@@ -165,6 +172,12 @@ object HardGuard {
                     }
                 }
             }
+            "19" ->
+                if (READ_DTC_REPORT.matches(command)) {
+                    GuardResult.Allowed(command)
+                } else {
+                    GuardResult.Rejected("ReadDTCInformation sub-function not allowed")
+                }
             else -> GuardResult.Rejected("service $service not allowed")
         }
     }

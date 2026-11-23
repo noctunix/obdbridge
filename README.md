@@ -20,6 +20,7 @@ Every command passes the caller-supplied policy before it is written, and
 the library additionally rejects on its own, regardless of that policy:
 
 - any service other than mode 01 reads, UDS ReadDataByIdentifier (`0x22`),
+  the ReadDTCInformation reports `1901`/`1902` (+ status mask) and `190A`,
   and an explicit, fixed allow-list of adapter `AT`/`ST` commands,
 - the VIN DIDs `F190` and `F802`,
 - the ECU serial number `F18C`,

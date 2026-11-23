@@ -1,3 +1,10 @@
+## 0.3.1
+
+- `HardGuard` allows the read-only ReadDTCInformation reports `1901` and
+  `1902` (each + a one-byte status mask) and `190A`. Every other `19`
+  sub-function, ClearDiagnosticInformation (`14`) and OBD mode 04 are still
+  rejected.
+
 ## 0.3.0
 
 - Companion-device pairing: `pairAdapter` pairs the CX once through
